@@ -17,9 +17,11 @@ __device__ __forceinline__ float3 operator*(float s, const float3& a) { return {
 __device__ __forceinline__ float dot(const float3& a, const float3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 __device__ __forceinline__ float3 cross(const float3& a, const float3& b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 __device__ __forceinline__ float length(const float3& a) { return sqrtf(dot(a, a)); }
-__device__ __forceinline__ float3 normalize(const float3& a) { float l = length(a); return (l > 1e-8) ? (1.0f / l) * a : float3{0,0,0}; }
+// Face validity is decided by area in the count kernel. A valid small face
+// must not lose its direction because its unnormalized cross product is small.
+__device__ __forceinline__ float3 normalize(const float3& a) { float l = length(a); return (l > 0.0f) ? (1.0f / l) * a : float3{0,0,0}; }
 
-// Matrix to quaternion conversion
+// Row-major local-to-world matrix to a quaternion stored as wxyz.
 __device__ __forceinline__ float4 rot_to_quat(const float3 R[3]) {
     float4 q;
     float trace = R[0].x + R[1].y + R[2].z;

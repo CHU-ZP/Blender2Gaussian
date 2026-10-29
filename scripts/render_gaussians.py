@@ -1,0 +1,171 @@
+"""Render the full Gaussian PLY with gsplat using saved indoor cameras."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+import numpy as np
+from PIL import Image, ImageDraw
+from plyfile import PlyData
+from mesh_to_gs.color import srgb_to_linear, linear_to_srgb
+
+
+def configure_cuda():
+    roots = [Path(os.environ["CUDA_HOME"])] if os.environ.get("CUDA_HOME") else [
+        Path("/usr/local/cuda-12.8"), Path("/usr/local/cuda"),
+        *sorted((Path.home() / "miniconda3/envs").glob("*")),
+        *sorted((Path.home() / "anaconda3/envs").glob("*")),
+    ]
+    for root in roots:
+        nvcc = root / "bin/nvcc"
+        if nvcc.is_file():
+            version = subprocess.check_output([str(nvcc), "--version"], text=True)
+            if "release 12.8," in version:
+                os.environ["CUDA_HOME"] = str(root)
+                os.environ["PATH"] = str(root / "bin") + os.pathsep + os.environ["PATH"]
+                include = root / "targets/x86_64-linux/include"
+                if include.exists():
+                    os.environ["CPATH"] = str(include) + os.pathsep + os.environ.get("CPATH", "")
+                os.environ.setdefault("MAX_JOBS", "1")
+                os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.9")
+                return
+    raise RuntimeError("CUDA Toolkit 12.8 is needed for the initial gsplat build; set CUDA_HOME")
+
+
+def contact_sheet(images, cameras, path):
+    width, height = images[0].size
+    thumb_width = 800
+    thumb_height = round(height * thumb_width / width)
+    label_height = 36
+    sheet = Image.new("RGB", (thumb_width * 2, (thumb_height + label_height) * 2), "white")
+    draw = ImageDraw.Draw(sheet)
+    for index, (image, camera) in enumerate(zip(images, cameras)):
+        x = (index % 2) * thumb_width
+        y = (index // 2) * (thumb_height + label_height)
+        sheet.paste(image.resize((thumb_width, thumb_height), Image.Resampling.LANCZOS), (x, y))
+        draw.text((x + 10, y + thumb_height + 8), camera["name"] + " | Gaussian splatting", fill="black")
+    sheet.save(path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", type=Path, nargs="?", default=Path("outputs/sk_00918_validation/model.ply"))
+    parser.add_argument("--blend", type=Path, default=Path("data/sk_00918.blend"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/sk_00918_validation/renders"))
+    parser.add_argument("--cameras", type=Path)
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--geometry", action="store_true", help="Also save float alpha and expected camera-Z depth")
+    parser.add_argument("--color-space", choices=("display", "linear"), default="linear",
+                        help="Stored SH0 is sRGB; linear decodes before compositing and encodes the final image")
+    parser.add_argument('--rasterize-mode',choices=('classic','antialiased'),default='classic')
+    parser.add_argument('--eps2d',type=float,default=.05,help='Screen covariance filter variance in pixels squared')
+    args = parser.parse_args()
+    if args.eps2d<=0:parser.error('--eps2d must be positive')
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    cameras_path = args.cameras or args.output_dir / "cameras.json"
+    if args.cameras is None:
+        subprocess.run([sys.executable, str(Path(__file__).with_name("export_interior_cameras.py")),
+                        str(args.blend), str(cameras_path), "--width", str(args.width), "--height", str(args.height)], check=True)
+    camera_data = json.loads(cameras_path.read_text())
+    configure_cuda()
+    import torch
+    import torch.nn.functional as F
+    import gsplat
+    from gsplat import rasterization
+
+    torch.set_grad_enabled(False)
+    device = torch.device("cuda")
+    # A tiny render triggers JIT and checks the actual CUDA rasterizer first.
+    print("Preparing gsplat CUDA rasterizer (initial compilation can take a few minutes)", flush=True)
+    warmup, warmup_alpha, _ = rasterization(
+        means=torch.tensor([[0.0, 0.0, 3.0]], device=device),
+        quats=torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device),
+        scales=torch.full((1, 3), 0.15, device=device),
+        opacities=torch.ones(1, device=device), colors=torch.tensor([[1.0, 0.0, 0.0]], device=device),
+        viewmats=torch.eye(4, device=device)[None],
+        Ks=torch.tensor([[[32.0, 0, 16], [0, 32.0, 16], [0, 0, 1]]], device=device), width=32, height=32,
+    )
+    assert torch.isfinite(warmup).all() and warmup_alpha.max() > 0.1
+    del warmup, warmup_alpha
+    torch.cuda.reset_peak_memory_stats()
+    data = PlyData.read(args.input, mmap="r")["vertex"].data
+    count = len(data)
+    print(f"Loading all {count:,} Gaussians from {args.input}", flush=True)
+
+    def columns(names):
+        return torch.from_numpy(np.column_stack([data[name] for name in names]).astype(np.float32)).to(device)
+
+    means = columns(["x", "y", "z"])
+    quats = F.normalize(columns([f"rot_{i}" for i in range(4)]), dim=-1)
+    scales = columns([f"scale_{i}" for i in range(3)]).exp()
+    opacities = torch.from_numpy(np.array(data["opacity"], dtype=np.float32)).to(device).sigmoid()
+    colors = (columns([f"f_dc_{i}" for i in range(3)]) * 0.28209479177387814 + 0.5).clamp(0, 1)
+    if args.color_space == "linear":
+        colors = srgb_to_linear(colors)
+    loading_peak=torch.cuda.max_memory_allocated()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    images, results = [], []
+    width, height = camera_data["width"], camera_data["height"]
+    for camera in camera_data["cameras"]:
+        print(f"Rendering {camera['name']} at {width}x{height}", flush=True)
+        tick = time.perf_counter()
+        event_start,event_end=torch.cuda.Event(enable_timing=True),torch.cuda.Event(enable_timing=True)
+        event_start.record()
+        rgb, alpha, metadata = rasterization(
+            means=means, quats=quats, scales=scales, opacities=opacities, colors=colors,
+            viewmats=torch.tensor(camera["view_matrix"], device=device, dtype=torch.float32)[None],
+            Ks=torch.tensor(camera["K"], device=device, dtype=torch.float32)[None],
+            width=width, height=height, near_plane=camera["near"], far_plane=camera["far"],
+            packed=True, radius_clip=0, eps2d=args.eps2d, rasterize_mode=args.rasterize_mode,
+            render_mode="RGB+ED" if args.geometry else "RGB",
+        )
+        event_end.record()
+        if args.geometry:
+            np.save(args.output_dir / (camera["name"] + "_depth.npy"), rgb[0, :, :, 3].cpu().numpy())
+            np.save(args.output_dir / (camera["name"] + "_alpha.npy"), alpha[0, :, :, 0].cpu().numpy())
+            rgb = rgb[..., :3]
+        # Composite white here: gsplat 1.5.3's packed-mode background shape
+        # check drops the camera dimension. RGB is premultiplied over black.
+        rgb = rgb + (1 - alpha)
+        if args.color_space == "linear":
+            rgb = linear_to_srgb(rgb)
+        torch.cuda.synchronize()
+        if not torch.isfinite(rgb).all() or not torch.isfinite(alpha).all():
+            raise ValueError(f"Non-finite image: {camera['name']}")
+        pixels = (rgb[0].clamp(0, 1).cpu().numpy() * 255).round().astype(np.uint8)
+        image = Image.fromarray(pixels)
+        output = args.output_dir / (camera["name"] + ".png")
+        image.save(output)
+        alpha_pixels = alpha[0, :, :, 0].cpu().numpy()
+        Image.fromarray((alpha_pixels.clip(0, 1) * 255).round().astype(np.uint8)).save(args.output_dir / (camera["name"] + "_alpha.png"))
+        visible = int(metadata["gaussian_ids"].numel())
+        results.append({"camera": camera["name"], "image": str(output), "seconds": time.perf_counter() - tick,
+                        "cuda_raster_milliseconds":event_start.elapsed_time(event_end),
+                        "projected_gaussians": visible, "mean_alpha": float(alpha_pixels.mean()),
+                        "covered_pixels_fraction": float((alpha_pixels > 0.95).mean())})
+        images.append(image)
+        print(json.dumps(results[-1]), flush=True)
+        del rgb, alpha, metadata
+    contact_sheet(images, camera_data["cameras"], args.output_dir / "contact_sheet.png")
+    report = {"source_ply": str(args.input), "gaussians": count, "renderer": "gsplat",
+              "renderer_version": gsplat.__version__, "gpu": torch.cuda.get_device_name(0),
+              "width": width, "height": height, "sh_degree": 0, "rasterize_mode": args.rasterize_mode,
+              "eps2d": args.eps2d, "radius_clip": 0, "quaternion_normalization": True,
+              "lighting": "Stored SH0 color only; no added lighting or image enhancement",
+              "stored_color_encoding": "sRGB", "compositing_color_space": args.color_space,
+              "depth": "Alpha-normalized expected camera Z (world units)" if args.geometry else None,
+              "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(),
+              "total_peak_cuda_allocated_bytes":max(loading_peak,torch.cuda.max_memory_allocated()),
+              "cameras_file": str(cameras_path), "views": results}
+    (args.output_dir / "render_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    print(f"Saved {len(images)} actual Gaussian renders to {args.output_dir}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

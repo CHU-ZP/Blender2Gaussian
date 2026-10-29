@@ -27,10 +27,15 @@ def mesh_to_gs_cuda(
     max_sh_degree: int = 0,
     epsilon: float = 1e-3,
     min_scale: float = 1.0/2048,
-    max_scale: float = 1.0/8
+    max_scale: float = 1.0/8,
+    seed: int = None,
 ):
     """
     Converts a mesh to a Gaussian Splatting model using a high-performance C++/CUDA backend.
+
+    Tangential scales use the actual per-face sample count. ``min_scale`` is
+    bounded by the local face support divided by sqrt(count); ``epsilon``
+    caps normal thickness, also limited to 10% of the smaller tangent scale.
     """
     if device != 'cuda':
         raise ValueError("This implementation only supports CUDA devices.")
@@ -59,7 +64,8 @@ def mesh_to_gs_cuda(
     # 2. Call the C++/CUDA function
     xyz, colors, scales, rots, opacities = _C.convert(
         verts_tensor, faces_tensor, vc_tensor, uvs_tensor, tex_tensor,
-        float(R), float(k), epsilon, min_scale, max_scale
+        float(R), float(k), epsilon, min_scale, max_scale,
+        **({"seed": seed} if seed is not None else {}),
     )
     
     if xyz.numel() == 0:

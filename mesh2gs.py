@@ -88,6 +88,7 @@ def main():
             gs_model._xyz.data = gs_model._xyz.data * scale_factor + torch.tensor(original_center, 
                                                                                  device=gs_model._xyz.device, 
                                                                                  dtype=gs_model._xyz.dtype)
+            gs_model._scaling.data += math.log(scale_factor)
             
     print(f"Saving Gaussian Splatting model to: {args.output_path}")
     gs_model.save_ply(args.output_path)

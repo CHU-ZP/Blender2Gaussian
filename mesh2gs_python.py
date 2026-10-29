@@ -129,7 +129,8 @@ def mesh_to_gaussmodel_improved(vertices, faces, vertex_colors=None, uvs=None, t
     v2 = verts[faces[:,2]]
     cross = np.cross(v1 - v0, v2 - v0)
     areas = 0.5 * np.linalg.norm(cross, axis=1)
-    normals = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-12)
+    cross_lengths = np.linalg.norm(cross, axis=1, keepdims=True)
+    normals = np.divide(cross, cross_lengths, out=np.zeros_like(cross), where=cross_lengths > 0)
 
     A_target = (1.0 / R) ** 2
     p = 1.0 / (2.0 * R)
@@ -147,12 +148,15 @@ def mesh_to_gaussmodel_improved(vertices, faces, vertex_colors=None, uvs=None, t
     def sample_barycentric(n):
         if n == 1:
             return np.array([[1/3,1/3,1/3]], dtype=np.float64)
-        r1 = np.random.rand(n)
-        r2 = np.random.rand(n)
-        sqrt_r1 = np.sqrt(r1)
-        u = 1 - sqrt_r1
-        v = r2 * sqrt_r1
-        w = 1 - u - v
+        side = math.ceil(math.sqrt(n))
+        cells = ((2 * np.arange(n, dtype=np.int64) + 1) * side ** 2) // (2 * n)
+        rows = side - np.ceil(np.sqrt(side ** 2 - cells)).astype(int)
+        offsets = cells - (side ** 2 - (side - rows) ** 2)
+        center = (1 + offsets % 2) / 3
+        jitter = .3 * (np.random.random((n, 2)) - .5)
+        v = (offsets // 2 + center + jitter[:, 0]) / side
+        w = (rows + center + jitter[:, 1]) / side
+        u = 1 - v - w
         return np.stack([u, v, w], axis=1)
 
     for fi in tqdm(range(len(faces)), desc="Converting Mesh to Gaussian", unit=" face"):
@@ -171,17 +175,17 @@ def mesh_to_gaussmodel_improved(vertices, faces, vertex_colors=None, uvs=None, t
             proj = e - np.dot(e, face_normal) * face_normal
             l = np.linalg.norm(proj)
             if l > best_len:
-                best_len = l; best = proj / (l + 1e-12)
+                best_len = l; best = proj / l
         if best is None:
             t = np.array([1.0, 0.0, 0.0])
             if abs(np.dot(t, face_normal)) > 0.9:
                 t = np.array([0.0, 1.0, 0.0])
             best = t - np.dot(t, face_normal) * face_normal
             best = best / (np.linalg.norm(best) + 1e-12)
-        bitangent = np.cross(face_normal, best); bitangent = bitangent / (np.linalg.norm(bitangent)+1e-12)
+        bitangent = np.cross(face_normal, best); bitangent = bitangent / np.linalg.norm(bitangent)
         Rmat = np.stack([best, bitangent, face_normal], axis=1)
-        uvec = Rmat[:,0]; uvec = uvec / (np.linalg.norm(uvec)+1e-12)
-        vtmp = Rmat[:,1] - np.dot(Rmat[:,1], uvec)*uvec; vtmp = vtmp / (np.linalg.norm(vtmp)+1e-12)
+        uvec = Rmat[:,0]; uvec = uvec / np.linalg.norm(uvec)
+        vtmp = Rmat[:,1] - np.dot(Rmat[:,1], uvec)*uvec; vtmp = vtmp / np.linalg.norm(vtmp)
         wtmp = np.cross(uvec, vtmp)
         Rmat = np.stack([uvec, vtmp, wtmp], axis=1)
         trace = Rmat[0,0] + Rmat[1,1] + Rmat[2,2]
@@ -213,15 +217,13 @@ def mesh_to_gaussmodel_improved(vertices, faces, vertex_colors=None, uvs=None, t
         quat = np.array([qw, qx, qy, qz], dtype=np.float32)
 
         edge_lengths = [np.linalg.norm(b-a), np.linalg.norm(c-b), np.linalg.norm(a-c)]
-        L = max(edge_lengths) + 1e-12
-        Af = max(areas[fi], 1e-12)
-        rf = (L**2) / (4.0 * Af + 1e-12)
-        rf = max(rf, 1e-6)
-
-        s1 = math.sqrt(rf / (pi * k)) * (1.0 / R)
-        s2 = 1.0 / (math.sqrt(pi * k * rf) * R)
-        s1 = float(np.clip(s1, min_scale, max_scale))
-        s2 = float(np.clip(s2, min_scale, max_scale))
+        L = max(edge_lengths)
+        # Match the actual allocation: before clamps pi*s1*s2 = area/n.
+        support1 = 0.5 * L / math.sqrt(n)
+        support2 = (2.0 * areas[fi] / L) / math.sqrt(n)
+        s1 = min(max(support1 / math.sqrt(pi), min_scale), max_scale, support1)
+        s2 = min(max(support2 / math.sqrt(pi), min_scale), max_scale, support2)
+        thickness = min(epsilon, 0.1 * min(s1, s2))
 
         if vertex_colors is not None:
             c0 = vertex_colors[faces[fi,0]]
@@ -261,7 +263,7 @@ def mesh_to_gaussmodel_improved(vertices, faces, vertex_colors=None, uvs=None, t
         for i_sample in range(n):
             xyz_list.append(positions[i_sample].astype(np.float32))
             color_list.append((cols[i_sample] * comp_arr[i_sample]).astype(np.float32))
-            scaling_list.append(np.array([s1, s2, epsilon], dtype=np.float32))
+            scaling_list.append(np.array([s1, s2, thickness], dtype=np.float32))
             rot_list.append(quat.astype(np.float32))
             opacity_list.append(np.array([inverse_sigmoid(torch.tensor(0.99)).item()], dtype=np.float32))
 
@@ -371,6 +373,7 @@ def main():
             gs_model._xyz.data = gs_model._xyz.data * scale_factor + torch.tensor(original_center, 
                                                                                  device=gs_model._xyz.device, 
                                                                                  dtype=gs_model._xyz.dtype)
+            gs_model._scaling.data += math.log(scale_factor)
             
     print(f"Saving Gaussian Splatting model to: {args.output_path}")
     gs_model.save_ply(args.output_path)

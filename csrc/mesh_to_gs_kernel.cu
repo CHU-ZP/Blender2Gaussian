@@ -133,35 +133,52 @@ __global__ void generate_gaussians_kernel(
         }
     }
     float3 bitangent = normalize(cross(face_normal, best_tangent));
-    float3 Rmat_cols[3] = {best_tangent, bitangent, face_normal};
-    float4 quat = rot_to_quat(Rmat_cols);
+    float3 Rmat_rows[3] = {{best_tangent.x, bitangent.x, face_normal.x},
+                          {best_tangent.y, bitangent.y, face_normal.y},
+                          {best_tangent.z, bitangent.z, face_normal.z}};
+    float4 quat = rot_to_quat(Rmat_rows);
 
     // Scaling
     float edge_lengths[3] = {length(v1-v0), length(v2-v1), length(v0-v2)};
     float max_edge_len = fmaxf(edge_lengths[0], fmaxf(edge_lengths[1], edge_lengths[2]));
     float area = 0.5f * length(cross(v1 - v0, v2 - v0));
-    float rf = (max_edge_len * max_edge_len) / fmaxf(4.0f * area, 1e-12f);
-    rf = fmaxf(rf, 1e-6f);
-
-    float s1 = sqrtf(rf / (M_PI * k)) * (1.0f / R);
-    float s2 = 1.0f / (sqrtf(M_PI * k * rf) * R);
-    s1 = fminf(fmaxf(s1, min_scale), max_scale);
-    s2 = fminf(fmaxf(s2, min_scale), max_scale);
-    float3 scale = {s1, s2, epsilon};
+    // Use the actual integer allocation, including faces rounded up to one.
+    // Before clamping: pi * s1 * s2 = area / n_gaussians_in_face.
+    // Support limits shrink with both the face dimensions and sample count,
+    // so the requested minimum cannot inflate a tiny face or a thin sliver.
+    float inv_sqrt_count = 1.0f / sqrtf(static_cast<float>(n_gaussians_in_face));
+    float support1 = 0.5f * max_edge_len * inv_sqrt_count;
+    float support2 = (2.0f * area / max_edge_len) * inv_sqrt_count;
+    float s1 = support1 / sqrtf(M_PI);
+    float s2 = support2 / sqrtf(M_PI);
+    s1 = fminf(fmaxf(s1, min_scale), fminf(max_scale, support1));
+    s2 = fminf(fmaxf(s2, min_scale), fminf(max_scale, support2));
+    float thickness = fminf(epsilon, 0.1f * fminf(s1, s2));
+    float3 scale = {s1, s2, thickness};
 
     // --- Generate Gaussians in parallel for this face ---
     curandState_t rand_state;
-    curand_init(seed, face_idx, thread_id, &rand_state);
+    curand_init(seed, static_cast<unsigned long long>(face_idx) * blockDim.x + thread_id,
+                0, &rand_state);
+    unsigned int side = static_cast<unsigned int>(ceilf(sqrtf(static_cast<float>(n_gaussians_in_face))));
+    unsigned long long cells = static_cast<unsigned long long>(side) * side;
     
     for (int i = thread_id; i < n_gaussians_in_face; i += blockDim.x) {
         unsigned int out_idx = base_offset + i;
 
-        // Barycentric sampling
-        float r1 = curand_uniform(&rand_state);
-        float r2 = curand_uniform(&rand_state);
-        float u = 1.0f - sqrtf(r1);
-        float v = r2 * sqrtf(r1);
-        float w = 1.0f - u - v;
+        // One jittered centroid per selected equal-area triangular stratum.
+        // Integer selection keeps strata distinct for non-square sample counts.
+        unsigned int cell = static_cast<unsigned int>(
+            ((2ull * i + 1) * cells) / (2ull * n_gaussians_in_face));
+        unsigned int row = side - static_cast<unsigned int>(ceilf(sqrtf(static_cast<float>(cells - cell))));
+        unsigned int first = static_cast<unsigned int>(cells - static_cast<unsigned long long>(side - row) * (side - row));
+        unsigned int offset = cell - first;
+        float center = (1.0f + (offset & 1)) / 3.0f;
+        float jitter1 = n_gaussians_in_face > 1 ? 0.3f * (curand_uniform(&rand_state) - 0.5f) : 0.0f;
+        float jitter2 = n_gaussians_in_face > 1 ? 0.3f * (curand_uniform(&rand_state) - 0.5f) : 0.0f;
+        float v = (offset / 2 + center + jitter1) / side;
+        float w = (row + center + jitter2) / side;
+        float u = 1.0f - v - w;
         
         // Position
         float3 pos = u * v0 + v * v1 + w * v2;

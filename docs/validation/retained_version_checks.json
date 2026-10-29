@@ -1,0 +1,74 @@
+{
+  "tests": {
+    "passed": 41,
+    "warnings": 6,
+    "log": "outputs/retained_version_tests.log",
+    "removed_tests": "Three tests for removed texture reshaping / optical-mass opacity experiments"
+  },
+  "environment_check": "passed: CPU/CUDA conversion, PLY, Blender materials, HDR/EXR, SH quadrature, ray query and plotting",
+  "uv_lock_check": "passed",
+  "uv_pip_check": "passed",
+  "effective_path_equivalence": {
+    "covariance_cases": [
+      {
+        "case": "uneven_rows",
+        "points": 2265,
+        "scales_rotations_areas_and_caps_identical": true
+      },
+      {
+        "case": "bounded_plane",
+        "points": 4096,
+        "scales_rotations_areas_and_caps_identical": true
+      },
+      {
+        "case": "curved_patch",
+        "points": 4096,
+        "scales_rotations_areas_and_caps_identical": true
+      }
+    ],
+    "selected_ply_gaussians": 18924395,
+    "fixed_opacity_logit_identical": true
+  },
+  "default_renderer_equivalence": [
+    {
+      "camera": "01_original_camera",
+      "rgb_depth_alpha_identical": true
+    },
+    {
+      "camera": "02_lounge_corner",
+      "rgb_depth_alpha_identical": true
+    },
+    {
+      "camera": "03_opposite_corner",
+      "rgb_depth_alpha_identical": true
+    },
+    {
+      "camera": "04_seating_area",
+      "rgb_depth_alpha_identical": true
+    }
+  ],
+  "calibration": {
+    "candidates": 54,
+    "selected": {
+      "base_spacing": 0.018,
+      "texture_weight": 8.0,
+      "overlap": 0.75,
+      "opacity": 0.995,
+      "curvature_weight": 1.0,
+      "detail_scale": 1.0,
+      "detail_weight": 0.25,
+      "max_normal_rotation": 0.22,
+      "curvature_power": 2,
+      "thin_support": true,
+      "directional_support": true
+    }
+  },
+  "smoke": {
+    "input": "data/sk_00918.blend",
+    "gaussians": 20000,
+    "scope": "Current-code runtime/finite-data check, not full-scene quality evaluation",
+    "mesh_objects": 2494,
+    "triangles": 4936252,
+    "seconds": 111.82417697900019
+  }
+}

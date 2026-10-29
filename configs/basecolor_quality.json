@@ -1,0 +1,13 @@
+{
+  "base_spacing": 0.018,
+  "texture_weight": 8.0,
+  "overlap": 0.75,
+  "opacity": 0.995,
+  "curvature_weight": 1.0,
+  "detail_scale": 1.0,
+  "detail_weight": 0.25,
+  "max_normal_rotation": 0.22,
+  "curvature_power": 2,
+  "thin_support": true,
+  "directional_support": true
+}
