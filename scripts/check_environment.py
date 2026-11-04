@@ -1,21 +1,17 @@
-"""Smoke-check conversion, Blender materials, texture tools, HDR and SH numerics."""
+"""Smoke-check the supported converters, surface initializer, Blender and EXR."""
 
 import argparse
 import importlib.util
-import math
 from pathlib import Path
 import tempfile
 
 import bpy
-import cv2
 import matplotlib
 import numpy as np
 import OpenEXR
 from plyfile import PlyData
 import scipy
-from scipy.special import sph_harm_y
 import torch
-import trimesh
 
 
 def main():
@@ -75,36 +71,38 @@ def main():
             bpy.data.materials.remove(material)
         print("PASS: Blender Principled BSDF material access")
 
+        from mesh_to_gs.surface import charts, sample_component, covariance
+        from mesh_to_gs.adaptive import TextureFeatures, prepare_importance
+        surface = charts(vertices[faces], faces)
+        texture = TextureFeatures(np.full((8, 8, 3), 128, np.uint8))
+        np.testing.assert_allclose(prepare_importance(surface, None, .024), 1)
+        np.testing.assert_allclose(texture.score(np.array([[.5, .5]]), np.zeros((2, 3)), .024), 0)
+        points, normals, _, boundary, spacing, _ = sample_component(surface, 0, 64, 123)
+        scales, quaternions, _ = covariance(points, normals, boundary, spacing)
+        assert len(points) == 64 and np.isfinite(scales).all() and (scales > 0).all()
+        np.testing.assert_allclose(np.linalg.norm(quaternions, axis=1), 1, atol=1e-6)
+        print("PASS: surface allocation, texture scoring, covariance and rotation")
+
+        from mesh_to_gs.visibility import VisibilityTester
+        box = np.array([[[x, y, z] for x, y in corners] for z in (0., 2.) for corners in
+                        (((-1, -1), (1, -1), (1, 1)), ((-1, -1), (1, 1), (-1, 1)))])
+        tester = VisibilityTester(box, [[-1, -1, 0], [1, 1, 2]], spacing=.5, min_enclosure=0)
+        assert len(tester.viewpoints) and abs(tester.normal_gap(np.array([[0., 0, 1]]), np.array([[0., 0, 1]]), 5.)[0] - 1) < 1e-3
+        print(f"PASS: GPU ray casting for visibility (Warp, {tester.device})")
+
         hdr = np.full((8, 8, 3), 4.0, dtype=np.float32)
         hdr_path = folder / "environment.exr"
         OpenEXR.File({}, {"RGB": hdr}).write(str(hdr_path))
         with OpenEXR.File(str(hdr_path)) as image:
             np.testing.assert_allclose(image.channels()["RGB"].pixels, hdr)
-        # Radiance HDR is another common environment-map format.
-        radiance_path = folder / "environment.hdr"
-        assert cv2.imwrite(str(radiance_path), hdr)
-        np.testing.assert_allclose(cv2.imread(str(radiance_path), cv2.IMREAD_UNCHANGED), hdr)
-        gradient = cv2.Sobel(hdr[:, :, 0], cv2.CV_32F, 1, 0)
-        assert np.isfinite(gradient).all()
-        print("PASS: floating-point EXR/HDR I/O and texture derivatives")
-
-        # Integrate a known directional function rather than fit rendered images.
-        mu, weights = np.polynomial.legendre.leggauss(16)
-        theta = np.arccos(mu)
-        coefficient = np.sum(weights * (0.5 + 0.2 * mu) * sph_harm_y(1, 0, theta, 0).real) * 2 * np.pi
-        np.testing.assert_allclose(coefficient, 0.2 * math.sqrt(4 * np.pi / 3), rtol=1e-12)
-        print("PASS: forward SH projection by numerical quadrature")
-
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-        assert mesh.ray.intersects_any([[0.2, 0.2, 1.0]], [[0.0, 0.0, -1.0]])[0]
-        print("PASS: mesh visibility ray query with rtree")
+        print("PASS: floating-point EXR I/O")
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         fig, axis = plt.subplots()
-        axis.plot(mu, 0.5 + 0.2 * mu)
-        fig.savefig(folder / "sh-check.png")
+        axis.scatter(points[:, 0], points[:, 1])
+        fig.savefig(folder / "surface-check.png")
         plt.close(fig)
         print("PASS: headless scientific plotting")
 

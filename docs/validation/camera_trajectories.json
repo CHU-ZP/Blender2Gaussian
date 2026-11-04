@@ -1,0 +1,168 @@
+{
+  "status": "pass",
+  "completed_at_utc": "2026-11-03T09:07:16.096588+00:00",
+  "retained_method": "views72_priority1500",
+  "tests": {
+    "full_suite": {
+      "command": "uv run --no-sync pytest -q",
+      "passed": 91,
+      "seconds": 41.98,
+      "stage": "Trajectory geometry implementation before final gaze and gallery adjustments"
+    },
+    "final_geometry_subset": {
+      "command": "uv run --no-sync pytest -q tests/test_trajectories.py",
+      "passed": 4,
+      "seconds": 15.0
+    },
+    "indoor_doorway_cpu_smoke": "Passed: route crosses the doorway and complete-Mesh clearance audit succeeds"
+  },
+  "output_root_directories": [
+    "best"
+  ],
+  "scenes": {
+    "sk_00918": {
+      "status": "pass",
+      "model_sha256": "0ae369289f2ae5713ef163181398fb465af8902ab5850e9d1c1facd5d46627e1",
+      "source_sha256": "514601b18893a7c18c0759e703898eee0e262e5c5ad9e0c2e97f3a7119e9cba6",
+      "cameras_sha256": "dc80fb9faf699c228f07c1cda38a45569360e985d99536da0be7b3fbd118337b",
+      "video_sha256": "07eba50153bdfeeabbdee99c831d6d2e5db6236de92375c8b643e2cdd66ba5d0",
+      "source_triangles": 4936252,
+      "gaussians": 8190560,
+      "original_render_views": 88,
+      "original_gallery": {
+        "status": "pass",
+        "local_static_links": 192
+      },
+      "frames": 288,
+      "rgb_pngs": 288,
+      "alpha_pngs": 288,
+      "all_pngs_verified": true,
+      "decoded_video": {
+        "status": "pass",
+        "frames": 288,
+        "duration_seconds": 12,
+        "fps": 24,
+        "width": 1280,
+        "height": 720,
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "duplicate_frames": 0,
+        "dropped_frames": 0
+      },
+      "trajectory_audit": {
+        "status": "pass",
+        "complete_mesh_clearance_metres": 0.25,
+        "sample_spacing_metres": 0.05,
+        "dense_checked_positions": 437,
+        "closed": false,
+        "path_length_metres": 13.089334661490078,
+        "maximum_frame_translation_metres": 0.0684223727176923,
+        "maximum_frame_rotation_degrees": 0.7444233327850801,
+        "orthonormal_error": 4.440892098500626e-16,
+        "minimum_foreground_fraction": 1.0,
+        "mean_foreground_fraction": 1.0,
+        "collision_method": "Float64 triangle/edge distances via complete-Mesh BVH; half-sample guard covers segments"
+      },
+      "keyframe_indices": [
+        0,
+        57,
+        115,
+        172,
+        230,
+        287
+      ],
+      "gallery": {
+        "status": "pass",
+        "local_static_links": 6
+      },
+      "visual_review": "Six final keyframes reviewed; room avoids end-of-route text-wall closeup; furniture shows six distinct orbit directions",
+      "video_bytes": 7538076,
+      "gpu_raster_milliseconds_per_frame": 10.253607236676746,
+      "total_render_and_png_seconds": 121.94597370596603,
+      "render_timing_note": "Measured with concurrent GPU jobs and filesystem load; descriptive, not a fair rendering benchmark"
+    },
+    "riliaodian": {
+      "status": "pass",
+      "model_sha256": "b11644789c602fff0f083c3120acc569292ac9d1c3a618db0e1a2acfc2f639e0",
+      "source_sha256": "065e9f9efa2ac7b54ae7d5311454f021ebc1eb39ec2562fc4f2892bea39dda6d",
+      "cameras_sha256": "4f23c3c0de355e2d8bd42cf822786b2f420fcf4eab7b40867b7d14f0ae396cc7",
+      "video_sha256": "94034176422ef9fae6c164b8129be69b688680382509faf9b104e1af023f8743",
+      "source_triangles": 14254847,
+      "gaussians": 2503124,
+      "original_render_views": 88,
+      "original_gallery": {
+        "status": "pass",
+        "local_static_links": 192
+      },
+      "frames": 288,
+      "rgb_pngs": 288,
+      "alpha_pngs": 288,
+      "all_pngs_verified": true,
+      "decoded_video": {
+        "status": "pass",
+        "frames": 288,
+        "duration_seconds": 12,
+        "fps": 24,
+        "width": 1280,
+        "height": 720,
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "duplicate_frames": 0,
+        "dropped_frames": 0
+      },
+      "trajectory_audit": {
+        "status": "pass",
+        "complete_mesh_clearance_metres": 0.25,
+        "sample_spacing_metres": 0.05,
+        "dense_checked_positions": 1441,
+        "closed": true,
+        "path_length_metres": 70.6577625001531,
+        "maximum_frame_translation_metres": 0.24533945312554764,
+        "maximum_frame_rotation_degrees": 1.2500000000007694,
+        "orthonormal_error": 4.440892098500626e-16,
+        "minimum_foreground_fraction": 0.041666666666666664,
+        "mean_foreground_fraction": 0.07912739748677249,
+        "collision_method": "Float64 triangle/edge distances via complete-Mesh BVH; half-sample guard covers segments"
+      },
+      "keyframe_indices": [
+        0,
+        48,
+        96,
+        144,
+        192,
+        240
+      ],
+      "gallery": {
+        "status": "pass",
+        "local_static_links": 6
+      },
+      "visual_review": "Six final keyframes reviewed; room avoids end-of-route text-wall closeup; furniture shows six distinct orbit directions",
+      "video_bytes": 3058937,
+      "gpu_raster_milliseconds_per_frame": 37.104104863272774,
+      "total_render_and_png_seconds": 66.46914730244316,
+      "render_timing_note": "Measured with concurrent GPU jobs and filesystem load; descriptive, not a fair rendering benchmark"
+    }
+  },
+  "temporary_probe_outputs_removed": true,
+  "numerical_checks": "Finite poses, inverse view matrices, proper orthonormal rotations, full Mesh clearance including frame intervals and closed edge",
+  "scope": "Original models only; no retraining; original 88-view resources retained",
+  "original_resources": {
+    "files_excluding_trajectory": 1448,
+    "model_and_source_hashes_unchanged": true,
+    "static_gallery_links_valid": true
+  },
+  "removed_temporary_paths": [
+    "/tmp/mesh2gaussian-trajectory-preview-81g2z7ux",
+    "/tmp/mesh2gaussian-room-trajectory-sampling.log",
+    "/tmp/mesh2gaussian-furniture-trajectory-sampling.log",
+    "/tmp/mesh2gaussian-room-trajectory-final-audit.log",
+    "/tmp/mesh2gaussian-furniture-trajectory-decode.txt",
+    "/tmp/mesh2gaussian-furniture-trajectory-decode.log",
+    "/tmp/mesh2gaussian-trajectory-final-tests.log",
+    "/tmp/mesh2gaussian-validate-trajectories.py",
+    "/tmp/mesh2gaussian-trajectory-validation.log"
+  ],
+  "documentation_links_valid": true,
+  "syntax_check": "python -m compileall passed for the four trajectory/render modules",
+  "git_diff_check": "pass"
+}

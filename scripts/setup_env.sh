@@ -12,6 +12,8 @@ else
     cuda_candidates=(
         /usr/local/cuda-12.8/bin/nvcc
         /usr/local/cuda/bin/nvcc
+        "$HOME"/.local/cuda-12.8/bin/nvcc
+        "$HOME"/.local/cuda/bin/nvcc
     )
     if command -v nvcc >/dev/null; then
         cuda_candidates+=("$(command -v nvcc)")
@@ -41,9 +43,11 @@ CUDA_HOME="$(cd "$(dirname "$selected_nvcc")/.." && pwd)"
 export PATH="$CUDA_HOME/bin:$PATH"
 # Keep compilation within the memory budget of a laptop.
 export MAX_JOBS="${MAX_JOBS:-1}"
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
+# Build for the installed GPUs (A100: 8.0, RTX 4060 Laptop: 8.9).
+detected_arch="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | sort -u | paste -sd ';' || true)"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-${detected_arch:-8.9}}"
 
 echo "CUDA compiler: $selected_nvcc"
-echo "CUDA architectures: $TORCH_CUDA_ARCH_LIST (RTX 4060 Laptop: 8.9)"
+echo "CUDA architectures: $TORCH_CUDA_ARCH_LIST"
 uv sync --locked "$@"
 uv run --no-sync python scripts/check_environment.py

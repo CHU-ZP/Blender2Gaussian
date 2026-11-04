@@ -94,6 +94,7 @@ class Surface:
     perimeter: np.ndarray
     skipped: int
     curvature: np.ndarray | None = None
+    source: np.ndarray | None = None  # input triangle index of each valid face
 
     @cached_property
     def face_groups(self):
@@ -107,12 +108,14 @@ class Surface:
         return np.split(order, np.cumsum(np.bincount(labels, minlength=len(self.component_areas)))[:-1])
 
 
-def charts(triangles, vertex_ids, uv=None, crease_degrees=20):
+def charts(triangles, vertex_ids, uv=None, crease_degrees=20, *, retain_slivers=False, uv_tolerance=1e-5):
     triangles = np.asarray(triangles, np.float64)
     cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
-    lengths = np.linalg.norm(cross, axis=1)
+    lengths = (np.hypot(np.hypot(cross[:, 0], cross[:, 1]), cross[:, 2]) if retain_slivers
+               else np.linalg.norm(cross, axis=1))
     edge2 = np.max(np.sum((triangles - np.roll(triangles, 1, axis=1)) ** 2, axis=2), axis=1)
-    valid = (lengths > np.maximum(edge2 * 1e-12, 1e-18))
+    valid = lengths > (0 if retain_slivers else np.maximum(edge2 * 1e-12, 1e-18))
+    valid &= np.isfinite(triangles).all(axis=(1, 2)) & np.isfinite(lengths)
     skipped = int((~valid).sum())
     triangles, vertex_ids, lengths, cross = triangles[valid], vertex_ids[valid], lengths[valid], cross[valid]
     # Blender assets often duplicate vertices along shading splits. Restore
@@ -127,7 +130,8 @@ def charts(triangles, vertex_ids, uv=None, crease_degrees=20):
     n = len(triangles)
     if not n:
         return Surface(triangles, uv, normals, area, np.empty(0, int), np.empty(0),
-                       np.empty(0, int), np.empty(0, int), np.empty(0), np.empty(0), skipped)
+                       np.empty(0, int), np.empty(0, int), np.empty(0), np.empty(0), skipped,
+                       source=np.flatnonzero(valid))
     edges = vertex_ids[:, [[0, 1], [1, 2], [2, 0]]].reshape(-1, 2)
     keys = np.sort(edges, axis=1)
     order = np.lexsort((keys[:, 1], keys[:, 0]))
@@ -153,7 +157,8 @@ def charts(triangles, vertex_ids, uv=None, crease_degrees=20):
         corners = np.stack((np.arange(len(edges)) % 3, (np.arange(len(edges)) % 3 + 1) % 3), axis=1)
         edge_uv = uv[np.arange(len(edges))[:, None] // 3, corners]
         edge_uv[edges[:, 0] > edges[:, 1]] = edge_uv[edges[:, 0] > edges[:, 1], ::-1]
-        join &= np.max(np.abs(edge_uv[left] - edge_uv[right]), axis=(1, 2)) < 1e-5
+        difference = np.max(np.abs(edge_uv[left] - edge_uv[right]), axis=(1, 2))
+        join &= (difference == 0) if uv_tolerance == 0 else (difference < uv_tolerance)
     graph = coo_matrix((np.ones(int(join.sum()), np.uint8), (f0[join], f1[join])), shape=(n, n))
     components, labels = connected_components(graph, directed=False)
     boundary = np.ones(len(edges), bool)
@@ -163,10 +168,12 @@ def charts(triangles, vertex_ids, uv=None, crease_degrees=20):
     boundary_lengths = np.linalg.norm(triangles[faces, corners] - triangles[faces, (corners + 1) % 3], axis=1)
     return Surface(triangles, uv, normals, area, labels,
                    np.bincount(labels, weights=area, minlength=components), faces, corners,
-                   boundary_lengths, np.bincount(labels[faces], weights=boundary_lengths, minlength=components), skipped,curvature)
+                   boundary_lengths, np.bincount(labels[faces], weights=boundary_lengths, minlength=components), skipped,curvature,
+                   np.flatnonzero(valid))
 
 
 def sample_component(surface, component, count, seed,texture=None,return_faces=False):
+    """Optionally also return each point's face and barycentric coordinates."""
     faces = surface.face_groups[component]
     boundary = surface.boundary_groups[component]
     area = surface.component_areas[component]
@@ -207,20 +214,27 @@ def sample_component(surface, component, count, seed,texture=None,return_faces=F
     uv = None if surface.uv is None else np.einsum('ni,nij->nj', bary, surface.uv[ids])
     segments = np.stack((surface.triangles[surface.boundary_faces[boundary], surface.boundary_corners[boundary]],
                          surface.triangles[surface.boundary_faces[boundary], (surface.boundary_corners[boundary] + 1) % 3]), axis=1)
-    result=(points, normals, uv, segments, spacing, boundary_count)
-    return result+(ids,) if return_faces else result
+    if return_faces:
+        return points, normals, uv, segments, spacing, boundary_count, ids, bary
+    return points, normals, uv, segments, spacing, boundary_count
 
 
-def covariance(points, normals, segments, spacing, overlap=.8, boundary_sigmas=2., chunk=32768,
-               return_areas=False,max_normal_rotation=None,directional_support=False):
-    """Estimate tangent spacing locally; cap covariance across chart boundaries."""
+def covariance(points, normals, segments, spacing, overlap=.8, boundary_sigmas=2., chunk=32768):
+    """Estimate tangent spacing locally; cap covariance across chart boundaries.
+
+    boundary_sigmas may also be one value per segment; segments with 0 are ignored.
+    """
+    per_segment = np.ndim(boundary_sigmas) > 0
+    if per_segment:
+        boundary_sigmas = np.asarray(boundary_sigmas, np.float64)
+        segments, boundary_sigmas = segments[boundary_sigmas > 0], boundary_sigmas[boundary_sigmas > 0]
     count = len(points)
     axes = np.eye(3)[np.argmin(np.abs(normals), axis=1)]
     tangent = np.cross(axes, normals)
     tangent /= np.linalg.norm(tangent, axis=1)[:, None]
     bitangent = np.cross(normals, tangent)
     tree = cKDTree(points)
-    k = min(count,49 if directional_support else 13)
+    k = min(count, 13)
     # Subdivide long edges so nearest-midpoint queries also find long boundaries.
     if len(segments):
         parts = np.maximum(1, np.ceil(np.linalg.norm(segments[:, 1] - segments[:, 0], axis=1) / (1.5 * spacing)).astype(int))
@@ -231,12 +245,12 @@ def covariance(points, normals, segments, spacing, overlap=.8, boundary_sigmas=2
         a = segments[segment_ids, 0] + fraction[:, None] * vec
         b = a + vec / parts[segment_ids, None]
         boundary_tree = cKDTree((a + b) / 2)
+        sub_sigmas = boundary_sigmas[segment_ids] if per_segment else boundary_sigmas
     else:
         boundary_tree = None
     scales = np.empty((count, 3), np.float32)
     quats = np.empty((count, 4), np.float32)
     capped = 0
-    density_areas=np.empty(count,np.float32) if return_areas else None
     for start in range(0, count, chunk):
         stop = min(start + chunk, count)
         p, n, t, bt = points[start:stop], normals[start:stop], tangent[start:stop], bitangent[start:stop]
@@ -250,56 +264,14 @@ def covariance(points, normals, segments, spacing, overlap=.8, boundary_sigmas=2
             C = np.einsum('nki,nkj,nk->nij', local, local, good) / np.maximum(valid_count, 1)[:, None, None]
             values, vectors = np.linalg.eigh(C)
             local_area = np.pi * np.max(np.sum(local ** 2, axis=2) * good, axis=1) / np.maximum(valid_count, 1)
-            if directional_support:
-                # Approximate the local Voronoi cell in eight directions.
-                # This measures uncovered directions, instead of mistaking
-                # a dense line of samples for a dense two-dimensional field.
-                angles=np.arange(8)*np.pi/4
-                direction=np.column_stack((np.cos(angles),np.sin(angles)))
-                radii=[];distance2=np.sum(local**2,axis=2)
-                for u in direction:
-                    projection=np.einsum('nki,i->nk',local,u)
-                    candidates=np.where(good&(projection>1e-9),.5*distance2/np.maximum(projection,1e-30),np.inf)
-                    radii.append(np.min(candidates,axis=1))
-                radii=np.stack(radii,axis=1)
-                # A dense row can fill the nearest-neighbor list before
-                # any sample across the next row is seen. Extend only
-                # points with an unbounded or unusually broad direction.
-                refine=np.any(~np.isfinite(radii)|(radii>1.25*spacing),axis=1)
-                if refine.any() and count>k:
-                    _,extra=tree.query(p[refine],k=min(count,257),workers=-1 if refine.sum()>4096 else 1)
-                    dd=points[extra[:,1:]]-p[refine,None]
-                    nn=n[refine]
-                    accepted=np.einsum('nki,ni->nk',normals[extra[:,1:]],nn)>.94
-                    accepted &= np.abs(np.einsum('nki,ni->nk',dd,nn))<max(.3*spacing,1e-9)
-                    xy=np.stack((np.einsum('nki,ni->nk',dd,t[refine]),np.einsum('nki,ni->nk',dd,bt[refine])),axis=2)
-                    rr=np.sum(xy**2,axis=2)
-                    for column,u in enumerate(direction):
-                        projection=np.einsum('nki,i->nk',xy,u)
-                        candidate=np.where(accepted&(projection>1e-9),.5*rr/np.maximum(projection,1e-30),np.inf)
-                        radii[refine,column]=np.min(candidate,axis=1)
-                radii=np.where(np.isfinite(radii),radii,2*spacing).clip(.05*spacing,8*spacing)
-                local_area=np.pi/8*np.sum(radii**2,axis=1)
-                moment=np.einsum('nk,ki,kj->nij',radii**4,direction,direction)/np.maximum(np.sum(radii**2,axis=1),1e-30)[:,None,None]
-                values,vectors=np.linalg.eigh(moment)
-            local_area = np.clip(local_area, .25 * spacing ** 2, (16 if directional_support else 4) * spacing ** 2)
-            local_area[valid_count<2]=spacing**2
+            local_area = np.clip(local_area, .25 * spacing ** 2, 4 * spacing ** 2)
             target = overlap ** 2 * local_area
-            shape = np.sqrt(np.maximum(values[:, 1], 1e-30) / np.maximum(values[:, 0], 1e-30)).clip(1, 8 if directional_support else 4)
+            shape = np.sqrt(np.maximum(values[:, 1], 1e-30) / np.maximum(values[:, 0], 1e-30)).clip(1, 4)
             values = np.stack((target / shape, target * shape), axis=1)
             values[valid_count < 2] = (overlap * spacing) ** 2
             C = np.einsum('nik,nk,njk->nij', vectors, values, vectors)
         else:
             C = np.tile(np.eye(2) * (overlap * spacing) ** 2, (len(p), 1, 1))
-            local_area=np.full(len(p),spacing**2)
-        if return_areas:density_areas[start:stop]=local_area
-        if max_normal_rotation is not None and k>1:
-            cosine=np.einsum('nki,ni->nk',normals[indices[:,1:]],n).clip(-1,1)
-            theta=np.arccos(cosine);theta[cosine>1-1e-12]=0
-            kappa=np.max(theta/np.maximum(np.linalg.norm(delta,axis=2),1e-12)*good,axis=1)
-            limit=max_normal_rotation/np.maximum(kappa,1e-12)
-            largest=np.linalg.eigvalsh(C)[:,1]
-            C*=np.minimum(1,limit**2/np.maximum(largest,1e-30))[:,None,None]
         if boundary_tree is not None:
             nearest_count = min(4, len(a))
             _, near = boundary_tree.query(p, k=nearest_count, workers=-1 if len(p) > 4096 else 1)
@@ -321,7 +293,7 @@ def covariance(points, normals, segments, spacing, overlap=.8, boundary_sigmas=2
                 distance = np.abs(np.sum(displacement * m3, axis=1))
                 Cm = np.einsum('nij,nj->ni', C, m)
                 variance = np.sum(m * Cm, axis=1)
-                limit = np.maximum(distance / boundary_sigmas, spacing * 1e-5) ** 2
+                limit = np.maximum(distance / (sub_sigmas[near[:, column]] if per_segment else sub_sigmas), spacing * 1e-5) ** 2
                 shrink = np.maximum(1 - limit / np.maximum(variance, 1e-30), 0)
                 C -= shrink[:, None, None] * np.einsum('ni,nj->nij', Cm, Cm) / np.maximum(variance, 1e-30)[:, None, None]
                 capped += int((shrink > 1e-6).sum())
@@ -335,12 +307,11 @@ def covariance(points, normals, segments, spacing, overlap=.8, boundary_sigmas=2
         scales[start:stop, 0] = np.sqrt(values[:, 1])
         scales[start:stop, 1] = np.sqrt(values[:, 0])
         scales[start:stop, 2] = .02 * np.sqrt(values[:, 0])
-    result=(scales, quats, capped)
-    return result+(density_areas,) if return_areas else result
+    return scales, quats, capped
 
 
 def small_single_face_components(surface, components, count, seed, group_index,
-                                 overlap=.8, boundary_sigmas=2.):
+                                 overlap=.8, boundary_sigmas=2., return_faces=False, edge_sigmas=None):
     """Batch disconnected 1--3 point facets without a tree per tiny chart.
 
     Neighbours are still strictly within each chart. All three triangle edges
@@ -383,7 +354,11 @@ def small_single_face_components(surface, components, count, seed, group_index,
         distance = np.abs(np.einsum('nki,ni->nk', points-triangles[:, None, corner], m3))
         Cm = np.einsum('nkij,nj->nki', C, m)
         variance = np.einsum('nki,ni->nk', Cm, m)
-        limit = np.maximum(distance/boundary_sigmas, h[:, None]*1e-5)**2
+        if edge_sigmas is None:
+            limit = np.maximum(distance/boundary_sigmas, h[:, None]*1e-5)**2
+        else:
+            sigma = edge_sigmas[faces, corner][:, None]
+            limit = np.where(sigma > 0, np.maximum(distance/np.where(sigma > 0, sigma, 1), h[:, None]*1e-5)**2, np.inf)
         shrink = np.maximum(1-limit/np.maximum(variance,1e-30),0)
         C -= (shrink/np.maximum(variance,1e-30))[...,None,None]*np.einsum('nki,nkj->nkij',Cm,Cm)
         capped += int((shrink>1e-6).sum())
@@ -396,10 +371,13 @@ def small_single_face_components(surface, components, count, seed, group_index,
     q = Rotation.from_matrix(np.stack((axis0,axis1,ns),axis=-1).reshape(-1,3,3)).as_quat(scalar_first=True)
     scales = np.stack((np.sqrt(values[...,1]),np.sqrt(values[...,0]),.02*np.sqrt(values[...,0])),axis=-1)
     uv = None if surface.uv is None else np.einsum('nki,nij->nkj',bary,surface.uv[faces]).reshape(-1,2)
-    return points.reshape(-1,3),ns.reshape(-1,3),uv,scales.reshape(-1,3).astype('float32'),q.astype('float32'),capped
+    result = points.reshape(-1,3),ns.reshape(-1,3),uv,scales.reshape(-1,3).astype('float32'),q.astype('float32'),capped
+    if return_faces:
+        return *result, np.repeat(faces, count), bary.reshape(-1, 3)
+    return result
 
 
-def singleton_components(surface, components, overlap=.8, boundary_sigmas=2.):
+def singleton_components(surface, components, overlap=.8, boundary_sigmas=2., return_faces=False, edge_sigmas=None):
     """Batch tiny multi-face charts with one point and no usable neighbours."""
     weights=surface.areas*(surface.importance if hasattr(surface,'importance') else 1)
     faces = np.array([surface.face_groups[c][np.searchsorted(
@@ -431,7 +409,11 @@ def singleton_components(surface, components, overlap=.8, boundary_sigmas=2.):
         distance = np.abs(np.sum(displacement*m3,axis=1))
         Cm = np.einsum('nij,nj->ni',C[rows],m)
         variance = np.sum(m*Cm,axis=1)
-        limit = np.maximum(distance/boundary_sigmas,h[rows]*1e-5)**2
+        if edge_sigmas is None:
+            limit = np.maximum(distance/boundary_sigmas,h[rows]*1e-5)**2
+        else:
+            sigma = edge_sigmas[f,c]
+            limit = np.where(sigma > 0, np.maximum(distance/np.where(sigma > 0, sigma, 1),h[rows]*1e-5)**2, np.inf)
         shrink = np.maximum(1-limit/np.maximum(variance,1e-30),0)
         C[rows] -= (shrink/np.maximum(variance,1e-30))[:,None,None]*np.einsum('ni,nj->nij',Cm,Cm)
         capped += int((shrink>1e-6).sum())
@@ -443,7 +425,48 @@ def singleton_components(surface, components, overlap=.8, boundary_sigmas=2.):
     q = Rotation.from_matrix(np.stack((axis0,axis1,n),axis=-1)).as_quat(scalar_first=True)
     sc = np.stack((np.sqrt(values[:,1]),np.sqrt(values[:,0]),.02*np.sqrt(values[:,0])),axis=1)
     uv = None if surface.uv is None else surface.uv[faces].mean(1)
+    if return_faces:
+        return p,n,uv,sc.astype('float32'),q.astype('float32'),capped,faces,np.full((len(faces),3),1/3)
     return p,n,uv,sc.astype('float32'),q.astype('float32'),capped
+
+
+def coplanar_seams(surfaces, crease_degrees=20):
+    """Per surface, an (F,3) mask of face edges shared exactly with a coplanar face of another chart.
+
+    Such chart boundaries (UV seams, material or object splits of one continuous
+    surface) are not silhouettes; the neighbouring chart continues the surface.
+    Matching uses exact vertex coordinates across all surfaces, as charts() does.
+    """
+    offsets = np.cumsum([0] + [len(s.component_areas) for s in surfaces])
+    seam = coplanar_seam_edges(np.concatenate([s.triangles for s in surfaces]),
+                               np.concatenate([s.labels + o for s, o in zip(surfaces, offsets)]),
+                               np.concatenate([s.normals for s in surfaces]), crease_degrees)
+    return np.split(seam, np.cumsum([len(s.areas) for s in surfaces])[:-1])
+
+
+def coplanar_seam_edges(triangles, chart, normals, crease_degrees=20):
+    """(F,3) mask of coplanar seam edges for faces with global chart ids."""
+    _, vertex = np.unique(triangles.reshape(-1, 3), axis=0, return_inverse=True)
+    vertex = vertex.reshape(-1, 3)
+    edges = np.sort(np.stack((vertex, np.roll(vertex, -1, axis=1)), -1).reshape(-1, 2), axis=1)
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    ordered = edges[order]
+    start = np.r_[0, np.flatnonzero(np.any(ordered[1:] != ordered[:-1], axis=1)) + 1]
+    sizes = np.diff(np.r_[start, len(order)])
+    seam = np.zeros(len(edges), bool)
+    same = np.zeros(len(edges), bool)
+    cos = math.cos(math.radians(crease_degrees))
+    for k in range(2, int(sizes.max(initial=1)) + 1):
+        members = order[start[sizes == k][:, None] + np.arange(k)]
+        for i in range(k):
+            for j in range(k):
+                if i != j:
+                    a, b = members[:, i], members[:, j]
+                    fa, fb = a // 3, b // 3
+                    same[a] |= chart[fa] == chart[fb]
+                    seam[a] |= (chart[fa] != chart[fb]) & (np.abs(np.einsum('ij,ij->i', normals[fa], normals[fb])) >= cos)
+    seam &= ~same
+    return seam.reshape(-1, 3)
 
 
 def linear_texture(texture):

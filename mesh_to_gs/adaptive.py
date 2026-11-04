@@ -65,39 +65,35 @@ class TextureCache:
         return value
 
 
-def uv_jacobians(surface):
+def uv_jacobians(surface, *, strict=False):
     e1=surface.triangles[:,1]-surface.triangles[:,0]
     e2=surface.triangles[:,2]-surface.triangles[:,0]
-    inv_cross=1/np.maximum(2*surface.areas,1e-30)
+    inv_cross=1/(2*surface.areas if strict else np.maximum(2*surface.areas,1e-30))
     b1=np.cross(e2,surface.normals)*inv_cross[:,None]
     b2=np.cross(surface.normals,e1)*inv_cross[:,None]
     d1=surface.uv[:,1]-surface.uv[:,0];d2=surface.uv[:,2]-surface.uv[:,0]
-    return d1[:,:,None]*b1[:,None,:]+d2[:,:,None]*b2[:,None,:]
+    result=d1[:,:,None]*b1[:,None,:]+d2[:,:,None]*b2[:,None,:]
+    if strict and not np.isfinite(result).all():
+        raise FloatingPointError('UV Jacobian cannot be represented at source-face precision')
+    return result
 
 
-def prepare_importance(surface,texture,spacing,texture_weight=2.,curvature_weight=1.,detail_scale=1.,curvature_power=1):
+def prepare_importance(surface,texture,spacing,texture_weight=2.,curvature_weight=1.,detail_scale=1.):
     """Return face importance; exact same field is used within large faces."""
     n=len(surface.areas)
     score=np.zeros(n,np.float32)
     jac=None
     if texture is not None and n:
         jac=uv_jacobians(surface)
-        # Large textured faces need area quadrature: a handful of fixed
-        # centroids can entirely miss thin glyphs or periodic checker edges.
-        probes=np.clip(np.ceil(surface.areas/(16*spacing**2)),7,128).astype(int)
-        levels=np.minimum(128,2**np.ceil(np.log2(probes)).astype(int))
-        for count in np.unique(levels):
-            take=np.flatnonzero(levels==count)
-            i=np.arange(count)+.5
-            root=np.sqrt(i/count);other=(i*.6180339887498949)%1
-            bary=np.stack((1-root,root*(1-other),root*other),axis=1)
-            for start in range(0,len(take),max(1,131072//count)):
-                ids=take[start:start+max(1,131072//count)]
-                uv=np.einsum('ki,nij->nkj',bary,surface.uv[ids]).reshape(-1,2)
-                j=np.repeat(jac[ids],count,axis=0)
-                values=texture.score(uv,j,spacing).reshape(len(ids),count)
-                score[ids]=values.mean(1)
-    curvature=np.zeros(n) if surface.curvature is None else np.clip((surface.curvature*spacing/.2)**curvature_power,0,8 if curvature_power>1 else 1)
+        bary=np.array([[1/3,1/3,1/3],[.8,.1,.1],[.1,.8,.1],[.1,.1,.8],
+                       [.45,.45,.1],[.45,.1,.45],[.1,.45,.45]])
+        for start in range(0,n,32768):
+            stop=min(start+32768,n)
+            uv=np.einsum('ki,nij->nkj',bary,surface.uv[start:stop]).reshape(-1,2)
+            j=np.repeat(jac[start:stop],len(bary),axis=0)
+            values=texture.score(uv,j,spacing).reshape(stop-start,-1)
+            score[start:stop]=values.mean(1)
+    curvature=np.zeros(n) if surface.curvature is None else np.clip(surface.curvature*spacing/.2,0,1)
     importance=1+detail_scale*(texture_weight*score+curvature_weight*curvature)
     surface.importance=importance
     surface.texture_scores=score
@@ -105,12 +101,6 @@ def prepare_importance(surface,texture,spacing,texture_weight=2.,curvature_weigh
     surface.uv_jacobian=jac
     surface.adaptive_config=(spacing,texture_weight,curvature_weight,detail_scale)
     return importance
-
-
-def narrow_importance(surface,spacing,support=False):
-    width=2*surface.component_areas/np.maximum(surface.perimeter,1e-30)
-    if support:return np.clip(spacing/np.maximum(width,1e-15)-1,0,8)
-    return .5*np.clip(1-width/(3*spacing),0,1)
 
 
 def face_sampler(surface,face,texture):

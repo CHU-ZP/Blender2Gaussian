@@ -1,22 +1,35 @@
-"""Render the full Gaussian PLY with gsplat using saved indoor cameras."""
+"""Render the full Gaussian PLY with gsplat using saved cameras."""
 
 import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
-import sys
 import time
 
 import numpy as np
+from mesh_to_gs.mesh_supervision import digest
 from PIL import Image, ImageDraw
 from plyfile import PlyData
 from mesh_to_gs.color import srgb_to_linear, linear_to_srgb
 
 
+def cuda_architectures():
+    """Compute capabilities of the visible GPUs, e.g. '8.0' (A100) or '8.9' (RTX 4060)."""
+    import torch
+    if not torch.cuda.is_available():
+        return "8.9"
+    return ";".join(sorted({"%d.%d" % torch.cuda.get_device_capability(i)
+                            for i in range(torch.cuda.device_count())}))
+
+
 def configure_cuda():
+    nvcc_on_path = shutil.which("nvcc")
     roots = [Path(os.environ["CUDA_HOME"])] if os.environ.get("CUDA_HOME") else [
         Path("/usr/local/cuda-12.8"), Path("/usr/local/cuda"),
+        Path.home() / ".local/cuda-12.8", Path.home() / ".local/cuda",
+        *([Path(nvcc_on_path).resolve().parents[1]] if nvcc_on_path else []),
         *sorted((Path.home() / "miniconda3/envs").glob("*")),
         *sorted((Path.home() / "anaconda3/envs").glob("*")),
     ]
@@ -31,7 +44,14 @@ def configure_cuda():
                 if include.exists():
                     os.environ["CPATH"] = str(include) + os.pathsep + os.environ.get("CPATH", "")
                 os.environ.setdefault("MAX_JOBS", "1")
-                os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.9")
+                os.environ.setdefault("TORCH_CUDA_ARCH_LIST", cuda_architectures())
+                # Warp or another dependency can import cpp_extension before
+                # this function runs. Its cached CUDA_HOME otherwise keeps
+                # the earlier toolkit and triggers conflicting gsplat builds.
+                import sys
+                extension = sys.modules.get('torch.utils.cpp_extension')
+                if extension is not None:
+                    extension.CUDA_HOME = str(root)
                 return
     raise RuntimeError("CUDA Toolkit 12.8 is needed for the initial gsplat build; set CUDA_HOME")
 
@@ -41,7 +61,7 @@ def contact_sheet(images, cameras, path):
     thumb_width = 800
     thumb_height = round(height * thumb_width / width)
     label_height = 36
-    sheet = Image.new("RGB", (thumb_width * 2, (thumb_height + label_height) * 2), "white")
+    sheet = Image.new("RGB", (thumb_width * 2, (thumb_height + label_height) * ((len(images)+1)//2)), "white")
     draw = ImageDraw.Draw(sheet)
     for index, (image, camera) in enumerate(zip(images, cameras)):
         x = (index % 2) * thumb_width
@@ -51,15 +71,21 @@ def contact_sheet(images, cameras, path):
     sheet.save(path)
 
 
+def centered_view_matrix(matrix, origin):
+    """Move camera and centres to the same float64-computed local frame."""
+    matrix = np.array(matrix, dtype=np.float64, copy=True)
+    matrix[:3, 3] += matrix[:3, :3] @ origin
+    return matrix
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, nargs="?", default=Path("outputs/sk_00918_validation/model.ply"))
-    parser.add_argument("--blend", type=Path, default=Path("data/sk_00918.blend"))
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/sk_00918_validation/renders"))
-    parser.add_argument("--cameras", type=Path)
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("input", type=Path, nargs="?", default=Path("outputs/best/sk_00918/model.ply"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/best/sk_00918/renders"))
+    parser.add_argument("--cameras", type=Path, default=Path('configs/sk_00918_cameras_render.json'))
     parser.add_argument("--geometry", action="store_true", help="Also save float alpha and expected camera-Z depth")
+    parser.add_argument('--no-contact-sheet', action='store_true',
+                        help='Stream long frame sequences without retaining every image for a contact sheet')
     parser.add_argument("--color-space", choices=("display", "linear"), default="linear",
                         help="Stored SH0 is sRGB; linear decodes before compositing and encodes the final image")
     parser.add_argument('--rasterize-mode',choices=('classic','antialiased'),default='classic')
@@ -67,10 +93,7 @@ def main():
     args = parser.parse_args()
     if args.eps2d<=0:parser.error('--eps2d must be positive')
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    cameras_path = args.cameras or args.output_dir / "cameras.json"
-    if args.cameras is None:
-        subprocess.run([sys.executable, str(Path(__file__).with_name("export_interior_cameras.py")),
-                        str(args.blend), str(cameras_path), "--width", str(args.width), "--height", str(args.height)], check=True)
+    cameras_path = args.cameras
     camera_data = json.loads(cameras_path.read_text())
     configure_cuda()
     import torch
@@ -100,7 +123,10 @@ def main():
     def columns(names):
         return torch.from_numpy(np.column_stack([data[name] for name in names]).astype(np.float32)).to(device)
 
-    means = columns(["x", "y", "z"])
+    world_means = np.column_stack([data[name] for name in 'xyz']).astype(np.float64)
+    origin = (world_means.min(0) + world_means.max(0)) / 2
+    means = torch.from_numpy((world_means - origin).astype(np.float32)).to(device)
+    del world_means
     quats = F.normalize(columns([f"rot_{i}" for i in range(4)]), dim=-1)
     scales = columns([f"scale_{i}" for i in range(3)]).exp()
     opacities = torch.from_numpy(np.array(data["opacity"], dtype=np.float32)).to(device).sigmoid()
@@ -119,7 +145,7 @@ def main():
         event_start.record()
         rgb, alpha, metadata = rasterization(
             means=means, quats=quats, scales=scales, opacities=opacities, colors=colors,
-            viewmats=torch.tensor(camera["view_matrix"], device=device, dtype=torch.float32)[None],
+            viewmats=torch.tensor(centered_view_matrix(camera["view_matrix"], origin), device=device, dtype=torch.float32)[None],
             Ks=torch.tensor(camera["K"], device=device, dtype=torch.float32)[None],
             width=width, height=height, near_plane=camera["near"], far_plane=camera["far"],
             packed=True, radius_clip=0, eps2d=args.eps2d, rasterize_mode=args.rasterize_mode,
@@ -149,14 +175,17 @@ def main():
                         "cuda_raster_milliseconds":event_start.elapsed_time(event_end),
                         "projected_gaussians": visible, "mean_alpha": float(alpha_pixels.mean()),
                         "covered_pixels_fraction": float((alpha_pixels > 0.95).mean())})
-        images.append(image)
+        if not args.no_contact_sheet:
+            images.append(image)
         print(json.dumps(results[-1]), flush=True)
         del rgb, alpha, metadata
-    contact_sheet(images, camera_data["cameras"], args.output_dir / "contact_sheet.png")
-    report = {"source_ply": str(args.input), "gaussians": count, "renderer": "gsplat",
+    if not args.no_contact_sheet:
+        contact_sheet(images, camera_data["cameras"], args.output_dir / "contact_sheet.png")
+    report = {"source_ply": str(args.input), "model_sha256": digest(args.input), "gaussians": count, "renderer": "gsplat",
               "renderer_version": gsplat.__version__, "gpu": torch.cuda.get_device_name(0),
               "width": width, "height": height, "sh_degree": 0, "rasterize_mode": args.rasterize_mode,
               "eps2d": args.eps2d, "radius_clip": 0, "quaternion_normalization": True,
+              "render_origin_world": origin.tolist(),
               "lighting": "Stored SH0 color only; no added lighting or image enhancement",
               "stored_color_encoding": "sRGB", "compositing_color_space": args.color_space,
               "depth": "Alpha-normalized expected camera Z (world units)" if args.geometry else None,
@@ -164,7 +193,7 @@ def main():
               "total_peak_cuda_allocated_bytes":max(loading_peak,torch.cuda.max_memory_allocated()),
               "cameras_file": str(cameras_path), "views": results}
     (args.output_dir / "render_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-    print(f"Saved {len(images)} actual Gaussian renders to {args.output_dir}", flush=True)
+    print(f"Saved {len(results)} actual Gaussian renders to {args.output_dir}", flush=True)
 
 
 if __name__ == "__main__":

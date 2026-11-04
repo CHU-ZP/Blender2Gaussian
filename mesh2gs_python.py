@@ -286,7 +286,7 @@ def mesh_to_gaussmodel_improved(vertices, faces, vertex_colors=None, uvs=None, t
     gm._features_rest = nn.Parameter(features[:,:,1:].transpose(1,2).contiguous().requires_grad_(True))
     gm._scaling = nn.Parameter(torch.log(scales).requires_grad_(True))
     gm._rotation = nn.Parameter(rots.requires_grad_(True))
-    gm._opacity = nn.Parameter(torch.tensor(opac, dtype=torch.float32, device=device).requires_grad_(True))
+    gm._opacity = nn.Parameter(opac.requires_grad_(True))
     gm.max_radii2D = torch.zeros((gm._xyz.shape[0]), device=device)
     return gm
 

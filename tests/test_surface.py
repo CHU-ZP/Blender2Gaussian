@@ -160,3 +160,57 @@ def test_independent_samples_and_tiny_normal(scale,backend):
     np.testing.assert_allclose(np.linalg.norm(q,axis=1),1,atol=2e-6)
     rot=Rotation.from_quat(q,scalar_first=True).as_matrix()
     np.testing.assert_allclose(rot[:,:,2],np.broadcast_to(R[:,2],(len(q),3)),atol=2e-6)
+
+
+def test_coplanar_seams_exclude_creases_and_open_edges():
+    from mesh_to_gs.surface import coplanar_seams
+    # Two coplanar unit squares split by a UV seam, plus a vertical flap on the far edge.
+    a=np.array([[[0,0,0],[1,0,0],[1,1,0]],[[0,0,0],[1,1,0],[0,1,0]]],float)
+    b=a+[1,0,0]
+    flap=np.array([[[2,0,0],[2,1,0],[2,1,1]],[[2,0,0],[2,1,1],[2,0,1]]],float)
+    s=charts(np.concatenate((a,b,flap)),np.arange(18).reshape(6,3),
+             np.concatenate((a[:,:,:2],b[:,:,:2]+5,flap[:,:,1:])))
+    seam=coplanar_seams([s])[0]
+    faces,corners=np.nonzero(seam)
+    ends=np.stack((s.triangles[faces,corners],s.triangles[faces,(corners+1)%3]),1)
+    # Only the shared x=1 edge, seen from both sides; not the crease at x=2 nor the open rim.
+    assert len(faces)==2 and np.all(ends[:,:,0]==1)
+
+
+def test_per_segment_boundary_sigmas_match_scalar_and_zero_ignores_segment():
+    s=square(8)
+    p,n,_,edges,h,_=sample_component(s,0,1024,3)
+    a,qa,_=covariance(p,n,edges,h)
+    b,qb,_=covariance(p,n,edges,h,boundary_sigmas=np.full(len(edges),2.))
+    np.testing.assert_array_equal(a,b);np.testing.assert_array_equal(qa,qb)
+    keep=edges[:,:,0].max(1)>1e-9          # drop the edges on x=0
+    c,_,_=covariance(p,n,edges[keep],h)
+    d,_,_=covariance(p,n,edges,h,boundary_sigmas=np.where(keep,2.,0.))
+    np.testing.assert_array_equal(c,d)
+
+
+def test_relaxed_seam_widens_footprint_across_the_seam_only():
+    from scripts.initialize_blend_surface import group_samples
+    from types import SimpleNamespace
+    left=np.array([[[0,0,0],[1,0,0],[1,1,0]],[[0,0,0],[1,1,0],[0,1,0]]],float)
+    s=charts(np.concatenate((left,left+[1,0,0])),np.arange(12).reshape(4,3),
+             np.concatenate((left[:,:,:2],left[:,:,:2]+5)))
+    args=SimpleNamespace(seed=1,overlap=.8,boundary_sigmas=2.,surface_metadata=False)
+    counts=np.array([400,400])
+    strict=list(group_samples(s,counts,args,0))
+    from mesh_to_gs.surface import coplanar_seams
+    s.edge_sigmas=np.where(coplanar_seams([s])[0],0.,2.)
+    relaxed=list(group_samples(s,counts,args,0))
+    from scipy.spatial.transform import Rotation
+    def sigma_x(batch):
+        p,_,_,sc,q,*_=batch
+        R=Rotation.from_quat(q,scalar_first=True).as_matrix()
+        C=np.einsum('nik,nk,njk->nij',R,sc.astype(float)**2,R)
+        return p,np.sqrt(C[:,0,0])
+    for a,b in zip(strict,relaxed):
+        p,sa=sigma_x(a);_,sb=sigma_x(b)
+        np.testing.assert_array_equal(a[0],b[0])                 # same centres
+        near_seam=np.abs(p[:,0]-1)<.02
+        assert np.median(sb[near_seam])>1.5*np.median(sa[near_seam])
+        far=np.abs(p[:,0]-1)>.3
+        np.testing.assert_allclose(sa[far],sb[far],rtol=1e-6)

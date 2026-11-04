@@ -1,0 +1,185 @@
+{
+  "status": "pass",
+  "completed_at_utc": "2026-11-03T13:04:13.206657+00:00",
+  "tests": {
+    "command": ".venv/bin/python -m pytest -q tests/test_trajectories.py",
+    "passed": 5,
+    "seconds": 155.08
+  },
+  "retained_method": "views72_priority1500",
+  "scenes": {
+    "sk_00918": {
+      "status": "pass",
+      "model_sha256": "0ae369289f2ae5713ef163181398fb465af8902ab5850e9d1c1facd5d46627e1",
+      "source_sha256": "514601b18893a7c18c0759e703898eee0e262e5c5ad9e0c2e97f3a7119e9cba6",
+      "cameras_sha256": "820b49dca966dfab2aafd81e825def12b73078f709bbb4935947f72f71213f22",
+      "comparison_video_sha256": "26592797be95a8e24540d9724560a58a0ed0921e65bb32e5436133255edbdcf0",
+      "comparison_video": {
+        "status": "pass",
+        "frames": 720,
+        "fps": 24,
+        "duration_seconds": 30,
+        "width": 2560,
+        "height": 752,
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "duplicate_frames": 0,
+        "dropped_frames": 0
+      },
+      "gaussian_video": {
+        "status": "pass",
+        "frames": 720,
+        "fps": 24,
+        "duration_seconds": 30,
+        "width": 1280,
+        "height": 720,
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "duplicate_frames": 0,
+        "dropped_frames": 0
+      },
+      "mesh_rgb_pngs": 720,
+      "gaussian_rgb_pngs": 720,
+      "gaussian_alpha_pngs": 720,
+      "all_pngs_verified": true,
+      "all_frame_names_match": true,
+      "mesh_samples": 16,
+      "maximum_projection_error_pixels": 1.0103110639647639e-05,
+      "trajectory_audit": {
+        "status": "pass",
+        "complete_mesh_clearance_metres": 0.25,
+        "sample_spacing_metres": 0.05,
+        "dense_checked_positions": 1037,
+        "closed": false,
+        "path_length_metres": 29.72481047825669,
+        "maximum_frame_translation_metres": 0.06210931579279819,
+        "maximum_frame_rotation_degrees": 0.7064927559844542,
+        "orthonormal_error": 6.661338147750939e-16,
+        "minimum_foreground_fraction": 1.0,
+        "mean_foreground_fraction": 1.0,
+        "collision_method": "Float64 triangle/edge distances via complete-Mesh BVH; half-sample guard covers segments"
+      },
+      "sampling": {
+        "grid_spacing": 0.2,
+        "camera_height": 1.4892533715594283,
+        "free_grid_points": 3691,
+        "component_points": 3581,
+        "smoothing_blend": 0.5,
+        "dense_checked_positions": 1037,
+        "gaze": {
+          "mode": "fixed_target",
+          "target": [
+            109.0,
+            132.0,
+            1.0
+          ]
+        }
+      },
+      "gallery_static_links_checked": 11,
+      "original_gallery_static_links_checked": 192,
+      "video_bytes": 36424930,
+      "paired_keyframe_review": "12 paired preview frames checked before full rendering",
+      "original_models_and_sources_unchanged": true,
+      "final_comparison_preview_reviewed": true
+    },
+    "riliaodian": {
+      "status": "pass",
+      "model_sha256": "b11644789c602fff0f083c3120acc569292ac9d1c3a618db0e1a2acfc2f639e0",
+      "source_sha256": "065e9f9efa2ac7b54ae7d5311454f021ebc1eb39ec2562fc4f2892bea39dda6d",
+      "cameras_sha256": "b91094157ff5e2af5f28b6178f429f313bec95ce484e2dec1657c45872cc9870",
+      "comparison_video_sha256": "8f8ac0e8d38b729be345041d7f89c2ad8d10906ad0e7bb1ece05c7d7ce4048ec",
+      "comparison_video": {
+        "status": "pass",
+        "frames": 720,
+        "fps": 24,
+        "duration_seconds": 30,
+        "width": 2560,
+        "height": 752,
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "duplicate_frames": 0,
+        "dropped_frames": 0
+      },
+      "gaussian_video": {
+        "status": "pass",
+        "frames": 720,
+        "fps": 24,
+        "duration_seconds": 30,
+        "width": 1280,
+        "height": 720,
+        "codec": "h264",
+        "pixel_format": "yuv420p",
+        "duplicate_frames": 0,
+        "dropped_frames": 0
+      },
+      "mesh_rgb_pngs": 720,
+      "gaussian_rgb_pngs": 720,
+      "gaussian_alpha_pngs": 720,
+      "all_pngs_verified": true,
+      "all_frame_names_match": true,
+      "mesh_samples": 16,
+      "maximum_projection_error_pixels": 1.0103110639647639e-05,
+      "trajectory_audit": {
+        "status": "pass",
+        "complete_mesh_clearance_metres": 0.25,
+        "sample_spacing_metres": 0.05,
+        "dense_checked_positions": 3601,
+        "closed": true,
+        "path_length_metres": 152.6582251250581,
+        "maximum_frame_translation_metres": 0.2120758165157213,
+        "maximum_frame_rotation_degrees": 1.000431818511833,
+        "orthonormal_error": 6.661338147750939e-16,
+        "minimum_foreground_fraction": 0.03571428571428571,
+        "mean_foreground_fraction": 0.0658151455026455,
+        "collision_method": "Float64 triangle/edge distances via complete-Mesh BVH; half-sample guard covers segments"
+      },
+      "sampling": {
+        "orbit_radius": 12.145415608078144,
+        "camera_height": 3.018123330462278,
+        "target": [
+          0.1909610652806557,
+          -0.2732688115863091,
+          1.028924600178153
+        ],
+        "bounding_box_frame_margin": 0.08,
+        "turns": 2,
+        "height_variation": 1.5,
+        "minimum_camera_height": 3.018123330462278,
+        "maximum_camera_height": 4.518123330462278,
+        "gaze": {
+          "mode": "fixed_target",
+          "target": [
+            0.1909610652806557,
+            -0.2732688115863091,
+            1.028924600178153
+          ]
+        }
+      },
+      "gallery_static_links_checked": 11,
+      "original_gallery_static_links_checked": 192,
+      "video_bytes": 11424010,
+      "paired_keyframe_review": "12 paired preview frames checked before full rendering",
+      "original_models_and_sources_unchanged": true,
+      "final_comparison_preview_reviewed": true
+    }
+  },
+  "original_88_view_resources_preserved": true,
+  "original_12_second_trajectories_preserved": true,
+  "full_mesh_audits": "Camera clearance includes all frame intervals and the furniture closing edge",
+  "comparison": "Same camera file; GT Mesh left, Gaussian right; source resolution preserved",
+  "temporary_previews_removed": true,
+  "original_nontrajectory_file_count": 1448,
+  "removed_preview_directories": [
+    {
+      "path": "outputs/best/sk_00918/trajectory_comparison/preview_probe",
+      "files": 42
+    },
+    {
+      "path": "outputs/best/riliaodian/trajectory_comparison/preview_probe",
+      "files": 42
+    }
+  ],
+  "syntax_check": "compileall passed for the modified trajectory and rendering scripts",
+  "git_diff_check": "pass",
+  "documentation_links_valid": true
+}

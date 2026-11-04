@@ -1,0 +1,19 @@
+{
+  "texture_covariance": {"strength": 0.5, "max_aspect": 2.0},
+  "training_cameras": {"base_views": 24, "base_seed": 20261101, "extra_seed": 2026110301},
+  "refinement": {
+    "steps": 1500, "views": 72, "width": 1280, "height": 720,
+    "query_count": 1048576, "query_neighbours": 64,
+    "seed": 20261102, "sampling_reference_steps": 500,
+    "priority_uniform_fraction": 0.5, "priority_ema": 0.9,
+    "dssim_weight": 0.2, "mesh_weight": 0.1, "mesh_colour_weight": 0.01,
+    "centre_weight": 1.0, "uv_weight": 0.01, "empty_weight": 1.0,
+    "tolerance": 0.0001, "mesh_pool": 16384, "mesh_batch": 2048,
+    "centre_batch": 4096, "neighbours": 32, "refresh_every": 50,
+    "position_lr": 0.00016, "scale_lr": 0.003, "rotation_lr": 0.001,
+    "colour_lr": 0.003, "opacity_lr": 0.01,
+    "scale_factor": 2.0, "max_displacement": 4.0,
+    "split_start": 100, "split_stop": 400, "split_every": 100,
+    "split_fraction": 0.02, "max_growth": 0.1, "split_threshold": 0.00002
+  }
+}

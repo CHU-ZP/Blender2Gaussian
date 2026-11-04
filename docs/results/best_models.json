@@ -1,0 +1,83 @@
+{
+  "method": "views72_priority1500",
+  "scenes": {
+    "sk_00918": {
+      "directory": "outputs/best/sk_00918",
+      "model": "model.ply",
+      "model_sha256": "0ae369289f2ae5713ef163181398fb465af8902ab5850e9d1c1facd5d46627e1",
+      "gaussians": 8190560,
+      "training_cameras": "training_cameras.json",
+      "render_cameras": "render_cameras.json",
+      "original_test": {
+        "basecolor_psnr_db": 27.063595862545558,
+        "basecolor_mae": 0.018294486783428647,
+        "opaque_coverage": 0.9783413534163888,
+        "depth_consistent_coverage": 0.9064267342049451,
+        "depth_mae_world_units": 0.017879742954391986,
+        "depth_within_3cm": 0.880548275045566,
+        "contour_f1": 0.3236625374168345,
+        "contour_precision": 0.2255868106621566,
+        "contour_recall": 0.6487431145997002,
+        "spill": 0.027470296223958336,
+        "silhouette_overflow": 0.0
+      },
+      "fresh_test": {
+        "basecolor_psnr_db": 26.808199592248062,
+        "basecolor_mae": 0.018591985698359202,
+        "opaque_coverage": 0.9813225478152002,
+        "depth_consistent_coverage": 0.9114178382210656,
+        "depth_mae_world_units": 0.01714909542351961,
+        "depth_within_3cm": 0.8801310298540672,
+        "contour_f1": 0.3482084654908367,
+        "contour_precision": 0.24933756492288972,
+        "contour_recall": 0.6513799389394668,
+        "spill": 0.025787353515625,
+        "silhouette_overflow": 0.0
+      },
+      "provenance": "provenance/",
+      "historical_paths": "Paths inside provenance reports identify the original completed runs; intermediate caches are regenerated from the source Blend."
+    },
+    "riliaodian": {
+      "directory": "outputs/best/riliaodian",
+      "model": "model.ply",
+      "model_sha256": "b11644789c602fff0f083c3120acc569292ac9d1c3a618db0e1a2acfc2f639e0",
+      "gaussians": 2503124,
+      "training_cameras": "training_cameras.json",
+      "render_cameras": "render_cameras.json",
+      "original_test": {
+        "basecolor_psnr_db": 28.013508703510578,
+        "basecolor_mae": 0.017318647036318007,
+        "opaque_coverage": 0.9856460905026521,
+        "depth_consistent_coverage": 0.892190647609181,
+        "depth_mae_world_units": 0.014969261130318046,
+        "depth_within_3cm": 0.871596109083197,
+        "contour_f1": 0.8383831047134002,
+        "contour_precision": 0.7650943109477609,
+        "contour_recall": 0.9465623016472486,
+        "spill": 0.01945498641119829,
+        "silhouette_overflow": 0.0015565556417468664
+      },
+      "fresh_test": {
+        "basecolor_psnr_db": 28.407027431283495,
+        "basecolor_mae": 0.01603635890773182,
+        "opaque_coverage": 0.9862774273989117,
+        "depth_consistent_coverage": 0.8896699149116798,
+        "depth_mae_world_units": 0.01574010436888784,
+        "depth_within_3cm": 0.8671572920145021,
+        "contour_f1": 0.840763832335137,
+        "contour_precision": 0.7714965792756657,
+        "contour_recall": 0.940345851894065,
+        "spill": 0.017979932597117682,
+        "silhouette_overflow": 0.0013610559180548152
+      },
+      "provenance": "provenance/",
+      "historical_paths": "Paths inside provenance reports identify the original completed runs; intermediate caches are regenerated from the source Blend."
+    }
+  },
+  "rendering": {
+    "training_views": 72,
+    "held_out_views": 16,
+    "width": 1280,
+    "height": 720
+  }
+}
