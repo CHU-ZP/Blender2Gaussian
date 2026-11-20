@@ -1,9 +1,0 @@
-{
-  "base_spacing": 0.024,
-  "texture_weight": 2.0,
-  "overlap": 0.8,
-  "opacity": 0.99,
-  "curvature_weight": 1.0,
-  "detail_scale": 1.0,
-  "detail_weight": 0.25
-}

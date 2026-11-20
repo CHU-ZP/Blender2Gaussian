@@ -1,11 +1,23 @@
-"""Unlit opaque Mesh BaseColor references (Cycles) at OpenCV-convention cameras."""
+"""Cycles Mesh references with BaseColor or illuminated Principled materials."""
 from pathlib import Path
+import hashlib
+import json
 import time
 
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 import numpy as np
 import OpenEXR
+from mesh_to_gs.color import MATERIAL_EXPOSURE_STOPS
+
+
+# Cycles EXR Combined is scene-linear; callers apply the shared fixed exposure
+# and display transform to the saved radiance before sRGB encoding.
+MATERIAL_LIGHTING_PROFILE = 'uniform_interior_softbox_grid_v10'
+MATERIAL_DISPLAY_TRANSFORM = 'aces_fitted'
+MATERIAL_INTERIOR_SOFTBOX_ENERGY = 5.0  # Base downward panel power; other groups are recorded separately.
+MATERIAL_INTERIOR_SOFTBOX_COUNT = 68  # 24 downward + 24 upward + 20 side panels for sk_00918.
+MATERIAL_LIGHTING_CONFIG = Path(__file__).resolve().parents[1]/'configs/material_lighting_v10.json'
 
 
 def configure_device(scene):
@@ -77,6 +89,198 @@ def base_color_materials():
         tree.links.new(emission.outputs[0], outputs[0].inputs['Surface'])
 
 
+def _scene_bounds():
+    """Return world-space bounds for placing deterministic auxiliary lights."""
+    corners = []
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or not obj.bound_box:
+            continue
+        corners.extend(np.asarray(obj.matrix_world @ Vector(c), dtype=np.float64) for c in obj.bound_box)
+    if not corners:
+        return np.array([-1., -1., -1.]), np.array([1., 1., 1.])
+    points = np.asarray(corners, dtype=np.float64)
+    return points.min(0), points.max(0)
+
+
+def _point_light_at(name, kind, location, target, *, energy, size=1.):
+    """Create a temporary Area/Sun light aimed at a world-space target."""
+    data = bpy.data.lights.new(name, type=kind)
+    data.energy = float(energy)
+    if kind == 'AREA':
+        data.shape = 'DISK'
+        data.size = float(size)
+    obj = bpy.data.objects.new(name, data)
+    obj['mesh_reference_generated'] = True
+    bpy.context.scene.collection.objects.link(obj)
+    obj.location = Vector(np.asarray(location, dtype=np.float64))
+    direction = Vector(np.asarray(target, dtype=np.float64))-obj.location
+    obj.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+    return obj
+
+
+def _setup_legacy_material_lighting():
+    """Add a stable studio light rig for source scenes without light objects.
+
+    The retained sk_00918 blend has no LIGHT objects.  Material rendering
+    without illumination produces nearly black references, so material mode
+    adds temporary lights after loading the blend.  The rig is scene-relative
+    and is never written back to the source blend.
+    """
+    scene = bpy.context.scene
+    lower, upper = _scene_bounds()
+    center = (lower+upper)/2
+    extent = np.maximum(upper-lower, 1.)
+    radius = float(np.linalg.norm(extent))
+    # A large-area light dome makes illumination stable across training and
+    # test cameras.  The panels are deliberately much larger than the room,
+    # so brightness changes slowly over a surface instead of producing small
+    # hot spots tied to one camera.  The broad exterior panels provide soft
+    # window-like directionality, while the interior fill below prevents the
+    # shelves and furniture from falling into a black cavity.
+    panel_size = max(12., 1.8*radius)
+    panel_specs = [
+        ('MeshRef_CeilingPanel', np.array([0., 0., 2.8]), 2600.),
+        ('MeshRef_FrontPanel', np.array([0., -2.4, .9]), 1560.),
+        ('MeshRef_BackPanel', np.array([0., 2.4, .9]), 1560.),
+        ('MeshRef_LeftPanel', np.array([-2.4, 0., .9]), 1560.),
+        ('MeshRef_RightPanel', np.array([2.4, 0., .9]), 1560.),
+    ]
+    lights = [
+        _point_light_at(name, 'AREA', center+direction*extent, center,
+                        energy=energy, size=panel_size)
+        for name, direction, energy in panel_specs
+    ]
+    # Four broad overhead corner panels provide cross-fill without introducing
+    # the hard directional shadowing of a key light.  Their lower power keeps
+    # the ceiling and floor from becoming a visible hotspot.
+    for sx in (-1., 1.):
+        for sy in (-1., 1.):
+            lights.append(_point_light_at(
+                f'MeshRef_Diagonal_{"L" if sx < 0 else "R"}{"F" if sy < 0 else "B"}',
+                'AREA', center+np.array([1.8*sx, 1.8*sy, 1.3])*extent,
+                center, energy=200., size=panel_size))
+    # The scene is an interior room. Exterior panels cannot illuminate the
+    # shelves and furniture behind the walls, so add broad ceiling softboxes.
+    # Avoid lights on the room boundary: training cameras can approach those
+    # surfaces, and a nearby emitter clips the whole view even at low power.
+    interior_size = max(8., .85*float(min(extent[0], extent[1])))
+    ceiling_z = float(upper[2] - .25*max(extent[2], .5))
+    interior_positions = (-.15, .15)
+    for ix, sx in enumerate(interior_positions):
+        for iy, sy in enumerate(interior_positions):
+            lights.append(_point_light_at(
+                f'MeshRef_InteriorCeiling_{ix}{iy}', 'AREA',
+                center+np.array([sx*extent[0], sy*extent[1], ceiling_z-center[2]]),
+                center, energy=24., size=interior_size))
+    # Keep a very weak sun only for numerical support on grazing surfaces; the
+    # broad panels and world fill carry the actual appearance target.
+    lights.append(_point_light_at('MeshRef_Sun', 'SUN', center+np.array([.4, -.3, 1.5])*extent,
+                                  center, energy=.2))
+    # Keep a small ambient term while retaining a transparent black camera
+    # background.  Existing world nodes are preserved except for this
+    # deterministic background strength/color used for material illumination.
+    world = scene.world
+    if world is None:
+        world = bpy.data.worlds.new('MeshRefWorld')
+        scene.world = world
+    world.use_nodes = True
+    background = next((n for n in world.node_tree.nodes if n.type == 'BACKGROUND'), None)
+    if background is None:
+        background = world.node_tree.nodes.new('ShaderNodeBackground')
+    # A neutral world fill reaches the recessed shelves and room corners that
+    # no finite panel can see directly.  It is deliberately below the panel
+    # contribution so the broad directional shading and material texture stay
+    # visible instead of turning into a flat albedo pass.
+    background.inputs['Color'].default_value = (0.35, 0.35, 0.35, 1.)
+    background.inputs['Strength'].default_value = 0.45
+    return dict(mode='uniform_area_dome_interior_fill_v9', lights=[obj.name for obj in lights],
+                bounds_lower=lower.tolist(), bounds_upper=upper.tolist(),
+                world_color=[.35, .35, .35], world_strength=.45, sun_energy=.2,
+                panel_size=panel_size, interior_panel_size=interior_size,
+                interior_softbox_count=4,
+                interior_softbox_energy=24.,
+                panel_count=len(lights),
+                panel_energy_scale='large-area dome; reduced exterior five primary + four diagonal + four interior ceiling fills')
+
+
+def setup_material_lighting():
+    """Distributed interior softboxes, retaining the v9 exterior/world fill.
+
+    The grid covers the room rather than concentrating four huge weak panels
+    near its center. Upward panels sit farther below the ceiling to spread
+    bounce illumination; open edges receive extra fill. All powers are fixed
+    across cameras, and the source blend is never overwritten.
+    """
+    config = json.loads(MATERIAL_LIGHTING_CONFIG.read_text())
+    if config['name'] != MATERIAL_LIGHTING_PROFILE:
+        raise ValueError('Lighting config/profile mismatch')
+    for obj in list(bpy.data.objects):
+        if obj.type == 'LIGHT' and obj.get('mesh_reference_generated'):
+            data = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.lights.remove(data)
+    legacy = _setup_legacy_material_lighting()
+    for obj in list(bpy.data.objects):
+        if obj.type == 'LIGHT' and obj.get('mesh_reference_generated') and obj.name.startswith('MeshRef_InteriorCeiling'):
+            data = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.lights.remove(data)
+    scene = bpy.context.scene
+    lower, upper = _scene_bounds()
+    center = (lower+upper)/2
+    deps = bpy.context.evaluated_depsgraph_get()
+    xs = np.linspace(lower[0]+config['inset'], upper[0]-config['inset'], config['nx'])
+    ys = np.linspace(lower[1]+config['inset'], upper[1]-config['inset'], config['ny'])
+    placed, rejected = [], []
+
+    def panel(name, location, target, energy, size, group):
+        obj = _point_light_at(name, 'AREA', location, target, energy=energy, size=size)
+        obj.visible_camera = False
+        placed.append(dict(name=name, location=list(obj.location), target=list(target),
+                           energy=energy, size=size, group=group))
+
+    for ix, x in enumerate(xs):
+        for iy, y in enumerate(ys):
+            hit, location, *_ = scene.ray_cast(deps, Vector((x, y, lower[2]+1.9)), Vector((0, 0, 1)))
+            if hit and location.z < lower[2]+2.35:
+                rejected.append(dict(x=float(x), y=float(y), reason='insufficient overhead clearance'))
+                continue
+            if not hit and not config['open_edge_fill']:
+                rejected.append(dict(x=float(x), y=float(y), reason='no ceiling'))
+                continue
+            ceiling = float(location.z) if hit else float(upper[2])-.4
+            z = min(ceiling-.25, float(upper[2])-.35)
+            energy_scale = 1. if hit else config['open_edge_energy_scale']
+            for side, energy, dz in [('Down', config['down_energy'], -2.), ('Up', config['up_energy'], 2.)]:
+                light_z = z-config['up_lowering'] if side == 'Up' else z
+                panel(f'MeshRef_Grid_{ix}_{iy}_{side}', [x, y, light_z], [x, y, light_z+dz],
+                      energy*energy_scale, config['panel_size'], 'ceiling_'+side.lower())
+    for axis in (0, 1):
+        other = 1-axis
+        positions = np.linspace(lower[other]+config['inset'], upper[other]-config['inset'],
+                                config['nx'] if other == 0 else config['ny'])
+        for side in (0, 1):
+            for i, value in enumerate(positions):
+                pos = center.copy()
+                pos[axis] = lower[axis]+config['inset'] if side == 0 else upper[axis]-config['inset']
+                pos[other], pos[2] = value, lower[2]+1.9
+                target = pos.copy()
+                target[axis] += 1. if side == 0 else -1.
+                panel(f'MeshRef_WallWash_{axis}_{side}_{i}', pos, target,
+                      config['wall_energy'], config['wall_size'], 'wall')
+    bpy.context.view_layer.update()
+    lights = [o.name for o in bpy.data.objects if o.type == 'LIGHT' and o.get('mesh_reference_generated')]
+    return dict(mode=MATERIAL_LIGHTING_PROFILE, config=config,
+                config_sha256=hashlib.sha256(MATERIAL_LIGHTING_CONFIG.read_bytes()).hexdigest(),
+                bounds_lower=lower.tolist(), bounds_upper=upper.tolist(), lights=lights,
+                panel_count=len(lights), interior_softbox_count=len(placed),
+                interior_softbox_energy=config['down_energy'], interior_lights=placed,
+                rejected_ceiling_cells=rejected,
+                exterior=dict(world_color=legacy['world_color'], world_strength=legacy['world_strength'],
+                              sun_energy=legacy['sun_energy'], panel_size=legacy['panel_size'],
+                              profile='v9 exterior/world settings retained'))
+
+
 def read_exr(path):
     image = OpenEXR.File(str(path), separate_channels=True)
     channels = {k: v.pixels for part in image.parts for k, v in part.channels.items()}
@@ -90,8 +294,14 @@ def load_blend(blend):
     bpy.ops.wm.open_mainfile(filepath=str(Path(blend).resolve()), load_ui=False)
 
 
-def render_references(blend, cameras, width, height, output_dir, samples=16):
-    """Render each camera to <name>.exr (premultiplied scene-linear RGB, alpha, camera-Z).
+def render_references(blend, cameras, width, height, output_dir, samples=16, material=False,
+                      material_lighting=True):
+    """Render each camera to <name>.exr (scene-linear RGB, alpha, camera-Z).
+
+    ``material=False`` preserves the historical emission BaseColor target.
+    With ``material=True`` the original Principled materials are preserved.
+    By default a fixed auxiliary rig and world fill generate the PBR target;
+    ``material_lighting=False`` keeps the authored illumination instead.
 
     Yields (camera entry, exr path, seconds, projection error in pixels).
     """
@@ -110,16 +320,29 @@ def render_references(blend, cameras, width, height, output_dir, samples=16):
     s.render.image_settings.exr_codec = 'ZIP'
     s.view_layers[0].use_pass_z = True
     s.cycles.samples = samples
-    s.cycles.use_denoising = s.cycles.use_adaptive_sampling = False
+    # Emission references are noise-free and keep the historical settings.
+    # Material mode uses indirect illumination from the added rig; denoising
+    # and adaptive sampling are required for a usable RGB target.
+    s.cycles.use_denoising = bool(material)
+    s.cycles.use_adaptive_sampling = bool(material)
     s.cycles.seed = 20261029
     s.view_settings.view_transform, s.view_settings.look = 'Standard', 'None'
-    s.view_settings.exposure, s.view_settings.gamma = 0, 1
-    base_color_materials()
+    # Keep the recorded display exposure fixed while varying physical lights.
+    # EXR Combined remains scene-linear; PNG/target conversion applies the
+    # exposure once outside Blender. BaseColor keeps neutral display exposure.
+    s.view_settings.exposure, s.view_settings.gamma = (MATERIAL_EXPOSURE_STOPS if material else 0), 1
+    lighting = None
+    if not material:
+        base_color_materials()
+    elif material_lighting:
+        lighting = setup_material_lighting()
     data = bpy.data.cameras.new('Geometry reference camera')
     cam = bpy.data.objects.new(data.name, data)
     s.collection.objects.link(cam)
     s.camera = cam
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    if lighting is not None:
+        (Path(output_dir)/'lighting_report.json').write_text(json.dumps(lighting, indent=2)+'\n')
     for entry in cameras:
         error = configure_camera(s, cam, entry, width, height)
         path = Path(output_dir) / (entry['name'] + '.exr')

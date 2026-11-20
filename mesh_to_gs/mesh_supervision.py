@@ -15,16 +15,14 @@ def digest(path):
 
 
 def model_inputs(model_dir):
-    """Normalize the two initializer schemas without changing saved inputs."""
+    """Load the single attached-initializer schema."""
     model_dir = Path(model_dir)
     report = json.loads((model_dir / 'initialization_report.json').read_text())
-    coverage = (model_dir / 'coverage_report.json').exists()
-    if coverage:
-        report = dict(report, source=report['input'], input_sha256=report['source_sha256'],
-                      visibility={'mode': 'open', 'max_gap': 0.})
-    else:
-        report = dict(report, visibility=report.get('visibility', {'mode': 'open', 'max_gap': 0.}))
-    return report, model_dir / ('surface' if coverage else 'surface_metadata'), coverage
+    # Octree initialization deliberately performs no visibility filtering.
+    # Training still uses the existing scene-aware close-layer query policy.
+    fallback = {'mode': 'auto', 'max_gap': .007} if report.get('method') == 'octree-voxel-surface' else {'mode': 'open', 'max_gap': 0.}
+    report = dict(report, visibility=report.get('visibility', fallback))
+    return report, model_dir / 'surface_metadata'
 
 
 def surface_distribution(triangles, charts, row_faces, retain_all=False, mode='density'):
@@ -188,15 +186,15 @@ def upgrade_neighbours(model_dir, cache, saved):
 
 
 
-def prepare_queries(model_dir, cache, count=1 << 20, k=64, tolerance=1e-4, seed=20261102, retain_all=False, surface_query_mode='density'):
+def prepare_queries(model_dir, cache, count=1 << 20, k=64, tolerance=1e-4, seed=20261102,
+                    retain_all=False, surface_query_mode='density', filter_hidden=False):
     """Build reusable visible surface / verified off-surface query data."""
     import time
     from numpy.lib.format import open_memmap
     from plyfile import PlyData
     from .visibility import VisibilityTester, mesh_distance
     model_dir, cache = Path(model_dir), Path(cache)
-    report, metadata, coverage = model_inputs(model_dir)
-    retain_all = bool(retain_all or coverage)
+    report, metadata = model_inputs(model_dir)
     configuration = dict(version=1, model_sha256=digest(model_dir / 'model.ply'),
                          source_sha256=digest(report['source']), count=count, k=k,
                          tolerance=tolerance, seed=seed)
@@ -204,6 +202,8 @@ def prepare_queries(model_dir, cache, count=1 << 20, k=64, tolerance=1e-4, seed=
         configuration['retain_all_surfaces'] = True
     if surface_query_mode != 'density':
         configuration['surface_query_mode'] = surface_query_mode
+    if filter_hidden:
+        configuration['filter_hidden_surface'] = True
     if configuration['source_sha256'] != report['input_sha256']:
         raise ValueError('Source Mesh changed since initialization')
     manifest = cache / 'queries.json'
@@ -238,7 +238,7 @@ def prepare_queries(model_dir, cache, count=1 << 20, k=64, tolerance=1e-4, seed=
         cross = np.cross(triangles[f, 1] - triangles[f, 0], triangles[f, 2] - triangles[f, 0])
         normals = cross / np.linalg.norm(cross, axis=1)[:, None]
         take = np.ones(n, bool)
-        if not retain_all:
+        if filter_hidden or not retain_all:
             near_layer = tester.normal_gap(p, normals, report['visibility']['max_gap']) < report['visibility']['max_gap']
             if near_layer.any():
                 take[near_layer] = tester.visible(p[near_layer])
@@ -326,7 +326,7 @@ def verify_empty_queries(model_dir, cache):
     if 'empty_label_verification' in saved:
         return saved
     start = time.perf_counter()
-    report, metadata, _ = model_inputs(model_dir)
+    report, metadata = model_inputs(model_dir)
     triangles = np.load(metadata / 'triangles.npy', mmap_mode='r')
     tester = VisibilityTester.for_scene(triangles, report['source_bounds'], report['visibility']['mode'])
     points = np.load(cache / 'points.npy', mmap_mode='r')

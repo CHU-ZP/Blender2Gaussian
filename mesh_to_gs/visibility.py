@@ -19,6 +19,7 @@ import math
 
 import numpy as np
 from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation
 import warp as wp
 
 
@@ -213,6 +214,10 @@ class VisibilityTester:
         # A tester without viewpoints still serves ray queries (_probe, normal_gap);
         # visible() then requires viewpoints.
         self.tree = cKDTree(self.viewpoints) if len(self.viewpoints) else None
+        self._visible_viewpoints = wp.array((self.viewpoints-self.origin).astype(np.float32),
+                                           dtype=wp.vec3, device=self.device)
+        self._visible_spread = np.linspace(0, len(self.viewpoints)-1,
+            min(self.distant, len(self.viewpoints))).astype(np.int32)
         self.candidates, self.probe = candidates, probe
         self.report = dict(
             device=self.device, grid_spacing=spacing, margin=margin, floor=floor, candidates=len(candidates), viewpoints=len(self.viewpoints),
@@ -316,11 +321,11 @@ class VisibilityTester:
             return np.zeros(0, bool)
         if self.tree is None:
             raise ValueError('No free-space viewpoints passed the enclosure/clearance tests')
-        viewpoints = wp.array((self.viewpoints - self.origin).astype(np.float32), dtype=wp.vec3, device=self.device)
+        viewpoints = self._visible_viewpoints
         k = min(self.neighbours, len(self.viewpoints))
         # Nearest viewpoints first, then a fixed spread over the whole set so
         # that surfaces seen only from across a room are not missed.
-        spread = np.linspace(0, len(self.viewpoints) - 1, min(self.distant, len(self.viewpoints))).astype(np.int32)
+        spread = self._visible_spread
         result = []
         for start in range(0, len(points), chunk):
             p = points[start:start + chunk]
@@ -334,3 +339,21 @@ class VisibilityTester:
                               self.epsilon, visible])
             result.append(visible.numpy().astype(bool))
         return np.concatenate(result)
+
+
+def coincident_hidden(tester, points, normals, scales, quats, max_gap, reach=4.):
+    """Samples to drop: another surface lies within max_gap along the normal and
+    neither the centre nor the +-reach sigma tangent footprint is visible.
+
+    Such layers are sorted unreliably against their occluder and bleed its
+    colour; hidden surfaces farther behind barely mix and are kept, as they
+    still fill seams in the visible layer.
+    """
+    drop = np.zeros(len(points), bool)
+    close = np.flatnonzero(tester.normal_gap(points, normals, max_gap) < max_gap)
+    if len(close):
+        rotation = Rotation.from_quat(np.asarray(quats[close], np.float64), scalar_first=True).as_matrix()
+        sigma = np.asarray(scales[close, :2], np.float64)
+        axes = np.stack((rotation[:, :, 0] * sigma[:, :1], rotation[:, :, 1] * sigma[:, 1:]), axis=1)
+        drop[close] = ~tester.visible(points[close], axes, reach)
+    return drop

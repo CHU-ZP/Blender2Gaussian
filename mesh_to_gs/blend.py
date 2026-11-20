@@ -45,17 +45,20 @@ def load_texture(image):
         return np.asarray(bitmap.convert("RGB"), dtype=np.uint8)
 
 
-def extract_scene():
-    depsgraph = bpy.context.evaluated_depsgraph_get()
+def evaluated_mesh_objects(depsgraph):
     if any(instance.is_instance for instance in depsgraph.object_instances):
         raise ValueError("This validation adapter does not expand collection/geometry instances")
+    for obj in bpy.context.scene.objects:
+        if obj.type == "MESH" and not obj.hide_render:
+            yield obj, obj.evaluated_get(depsgraph)
+
+
+def extract_scene():
+    depsgraph = bpy.context.evaluated_depsgraph_get()
     groups = {}
     object_bounds = []
     objects = []
-    for obj in bpy.context.scene.objects:
-        if obj.type != "MESH" or obj.hide_render:
-            continue
-        evaluated = obj.evaluated_get(depsgraph)
+    for obj, evaluated in evaluated_mesh_objects(depsgraph):
         mesh = evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
         try:
             if not mesh.vertices or not mesh.polygons:

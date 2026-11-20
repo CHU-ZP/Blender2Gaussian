@@ -1,0 +1,14 @@
+{
+  "name": "uniform_interior_softbox_grid_v10",
+  "nx": 6,
+  "ny": 4,
+  "inset": 1.0,
+  "panel_size": 3.5,
+  "down_energy": 5.0,
+  "up_energy": 3.0,
+  "wall_energy": 3.0,
+  "wall_size": 3.0,
+  "up_lowering": 0.7,
+  "open_edge_fill": true,
+  "open_edge_energy_scale": 2.0
+}

@@ -12,7 +12,7 @@ import numpy as np
 from mesh_to_gs.mesh_supervision import digest
 from PIL import Image, ImageDraw
 from plyfile import PlyData
-from mesh_to_gs.color import srgb_to_linear, linear_to_srgb
+from mesh_to_gs.color import composite_display_rgb, srgb_to_linear
 
 
 def cuda_architectures():
@@ -78,20 +78,39 @@ def centered_view_matrix(matrix, origin):
     return matrix
 
 
+def validate_appearance_render(report, display_transform, color_space):
+    """Reject a second tone map on models trained as final display appearance."""
+    if report.get('appearance', {}).get('color_domain') == 'display_linear':
+        if display_transform != 'standard' or color_space != 'linear':
+            raise ValueError('This model stores display-linear appearance: use '
+                             '--display-transform standard --color-space linear; '
+                             'exposure/ACES is already represented in its fitted colors')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, nargs="?", default=Path("outputs/best/sk_00918/model.ply"))
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/best/sk_00918/renders"))
-    parser.add_argument("--cameras", type=Path, default=Path('configs/sk_00918_cameras_render.json'))
+    parser.add_argument("input", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--cameras", type=Path, required=True)
     parser.add_argument("--geometry", action="store_true", help="Also save float alpha and expected camera-Z depth")
     parser.add_argument('--no-contact-sheet', action='store_true',
                         help='Stream long frame sequences without retaining every image for a contact sheet')
     parser.add_argument("--color-space", choices=("display", "linear"), default="linear",
-                        help="Stored SH0 is sRGB; linear decodes before compositing and encodes the final image")
+                        help="Evaluated SH is sRGB; linear decodes before compositing and encodes the final image")
+    parser.add_argument('--display-transform', choices=('standard', 'aces_fitted'), default='standard',
+                        help='Optional scene-linear display transform, matched to material reference rendering')
+    parser.add_argument('--exposure-stops', type=float, default=3.,
+                        help='Exposure applied before --display-transform; used only by aces_fitted')
+    parser.add_argument('--sh-degree', type=int, choices=range(4),
+                        help='Default: infer from standard PLY fields; 0 gives the fitted DC ablation')
     parser.add_argument('--rasterize-mode',choices=('classic','antialiased'),default='classic')
     parser.add_argument('--eps2d',type=float,default=.05,help='Screen covariance filter variance in pixels squared')
     args = parser.parse_args()
     if args.eps2d<=0:parser.error('--eps2d must be positive')
+    training_report_path = args.input.resolve().parent/'refinement_report.json'
+    training_report = (json.loads(training_report_path.read_text())
+                       if training_report_path.exists() else {})
+    validate_appearance_render(training_report, args.display_transform, args.color_space)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cameras_path = args.cameras
     camera_data = json.loads(cameras_path.read_text())
@@ -100,6 +119,8 @@ def main():
     import torch.nn.functional as F
     import gsplat
     from gsplat import rasterization
+    from gsplat.cuda._wrapper import spherical_harmonics
+    from mesh_to_gs.sh_lighting import load_sh, ply_sh_degree
 
     torch.set_grad_enabled(False)
     device = torch.device("cuda")
@@ -118,6 +139,10 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     data = PlyData.read(args.input, mmap="r")["vertex"].data
     count = len(data)
+    stored_degree = ply_sh_degree(data.dtype.names)
+    degree = stored_degree if args.sh_degree is None else args.sh_degree
+    if degree > stored_degree:
+        parser.error('Requested SH degree exceeds the PLY coefficient count')
     print(f"Loading all {count:,} Gaussians from {args.input}", flush=True)
 
     def columns(names):
@@ -130,9 +155,13 @@ def main():
     quats = F.normalize(columns([f"rot_{i}" for i in range(4)]), dim=-1)
     scales = columns([f"scale_{i}" for i in range(3)]).exp()
     opacities = torch.from_numpy(np.array(data["opacity"], dtype=np.float32)).to(device).sigmoid()
-    colors = (columns([f"f_dc_{i}" for i in range(3)]) * 0.28209479177387814 + 0.5).clamp(0, 1)
-    if args.color_space == "linear":
-        colors = srgb_to_linear(colors)
+    coeffs = None
+    if degree:
+        coeffs, _ = load_sh(data, device)
+    else:
+        colors = (columns([f"f_dc_{i}" for i in range(3)]) * 0.28209479177387814 + 0.5).clamp(0, 1)
+        if args.color_space == "linear":
+            colors = srgb_to_linear(colors)
     loading_peak=torch.cuda.max_memory_allocated()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
@@ -141,6 +170,12 @@ def main():
     for camera in camera_data["cameras"]:
         print(f"Rendering {camera['name']} at {width}x{height}", flush=True)
         tick = time.perf_counter()
+        if coeffs is not None:
+            world_camera = np.linalg.inv(np.asarray(camera['view_matrix'], np.float64))[:3, 3]
+            camera_position = torch.as_tensor(world_camera-origin, dtype=torch.float32, device=device)
+            colors = (spherical_harmonics(degree, means-camera_position, coeffs)+.5).clamp(0, 1)
+            if args.color_space == 'linear':
+                colors = srgb_to_linear(colors)
         event_start,event_end=torch.cuda.Event(enable_timing=True),torch.cuda.Event(enable_timing=True)
         event_start.record()
         rgb, alpha, metadata = rasterization(
@@ -156,11 +191,11 @@ def main():
             np.save(args.output_dir / (camera["name"] + "_depth.npy"), rgb[0, :, :, 3].cpu().numpy())
             np.save(args.output_dir / (camera["name"] + "_alpha.npy"), alpha[0, :, :, 0].cpu().numpy())
             rgb = rgb[..., :3]
-        # Composite white here: gsplat 1.5.3's packed-mode background shape
-        # check drops the camera dimension. RGB is premultiplied over black.
-        rgb = rgb + (1 - alpha)
-        if args.color_space == "linear":
-            rgb = linear_to_srgb(rgb)
+        if args.color_space == 'linear' or args.display_transform == 'aces_fitted':
+            rgb = composite_display_rgb(rgb, alpha, display_transform=args.display_transform,
+                                        exposure_stops=args.exposure_stops)
+        else:
+            rgb = rgb + (1 - alpha)
         torch.cuda.synchronize()
         if not torch.isfinite(rgb).all() or not torch.isfinite(alpha).all():
             raise ValueError(f"Non-finite image: {camera['name']}")
@@ -183,11 +218,16 @@ def main():
         contact_sheet(images, camera_data["cameras"], args.output_dir / "contact_sheet.png")
     report = {"source_ply": str(args.input), "model_sha256": digest(args.input), "gaussians": count, "renderer": "gsplat",
               "renderer_version": gsplat.__version__, "gpu": torch.cuda.get_device_name(0),
-              "width": width, "height": height, "sh_degree": 0, "rasterize_mode": args.rasterize_mode,
+              "width": width, "height": height, "sh_degree": degree,
+              "stored_sh_degree": stored_degree, "appearance": "sh",
+              "rasterize_mode": args.rasterize_mode,
               "eps2d": args.eps2d, "radius_clip": 0, "quaternion_normalization": True,
               "render_origin_world": origin.tolist(),
-              "lighting": "Stored SH0 color only; no added lighting or image enhancement",
+              "lighting": "Stored sRGB SH color; no additional runtime lighting",
               "stored_color_encoding": "sRGB", "compositing_color_space": args.color_space,
+              "trained_color_domain": training_report.get('appearance', {}).get('color_domain'),
+              "display_transform": args.display_transform,
+              "exposure_stops": args.exposure_stops if args.display_transform == 'aces_fitted' else 0.,
               "depth": "Alpha-normalized expected camera Z (world units)" if args.geometry else None,
               "peak_cuda_allocated_bytes": torch.cuda.max_memory_allocated(),
               "total_peak_cuda_allocated_bytes":max(loading_peak,torch.cuda.max_memory_allocated()),

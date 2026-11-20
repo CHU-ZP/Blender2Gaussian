@@ -44,6 +44,23 @@ def _closest_triangle(p: wp.vec3d, a: wp.vec3d, b: wp.vec3d, c: wp.vec3d):
 
 
 @wp.kernel
+def _owning_kernel(vertices: wp.array(dtype=wp.vec3d), points: wp.array(dtype=wp.vec3),
+                   owning: wp.array(dtype=wp.int32), targets: wp.array(dtype=wp.vec3),
+                   normals: wp.array(dtype=wp.vec3)):
+    i = wp.tid()
+    pf = points[i]
+    p = wp.vec3d(wp.float64(pf[0]), wp.float64(pf[1]), wp.float64(pf[2]))
+    face = owning[i]
+    a, b, c = vertices[3*face], vertices[3*face+1], vertices[3*face+2]
+    best = _closest_triangle(p, a, b, c)
+    n = wp.cross(b-a, c-a)
+    if wp.length(n) > wp.float64(0.0):
+        n = n/wp.length(n)
+    targets[i] = wp.vec3(wp.float32(best[0]), wp.float32(best[1]), wp.float32(best[2]))
+    normals[i] = wp.vec3(wp.float32(n[0]), wp.float32(n[1]), wp.float32(n[2]))
+
+
+@wp.kernel
 def _closest_kernel(mesh: wp.uint64, vertices: wp.array(dtype=wp.vec3d),
                     points: wp.array(dtype=wp.vec3), owning: wp.array(dtype=wp.int32),
                     guard: float, targets: wp.array(dtype=wp.vec3),
@@ -91,6 +108,21 @@ class MeshTargets:
         self.vertices = wp.array(flat, dtype=wp.vec3d, device=device)
         self.mesh = wp.Mesh(points=wp.array(flat.astype(np.float32), dtype=wp.vec3, device=device),
                             indices=wp.array(np.arange(len(flat), dtype=np.int32), dtype=wp.int32, device=device))
+
+    @torch.no_grad()
+    def closest_owning(self, positions, owning_faces):
+        """Closest point on the original source triangle, with no face switching."""
+        positions = positions.detach().contiguous()
+        faces = owning_faces.to(torch.int32).contiguous()
+        targets, normals = torch.empty_like(positions), torch.empty_like(positions)
+        if len(positions):
+            with wp.ScopedStream(wp.stream_from_torch(torch.cuda.current_stream(positions.device))) \
+                    if positions.is_cuda else wp.ScopedDevice('cpu'):
+                wp.launch(_owning_kernel, len(positions), device=self.device,
+                          inputs=[self.vertices, wp.from_torch(positions, dtype=wp.vec3),
+                                  wp.from_torch(faces, dtype=wp.int32), wp.from_torch(targets, dtype=wp.vec3),
+                                  wp.from_torch(normals, dtype=wp.vec3)])
+        return targets, normals, faces
 
     @torch.no_grad()
     def closest(self, positions, owning_faces):

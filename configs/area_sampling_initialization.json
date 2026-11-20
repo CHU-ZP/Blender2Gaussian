@@ -1,0 +1,7 @@
+{
+  "spacing": 0.024,
+  "seed": 20261116,
+  "sigma_factor": 0.8,
+  "opacity": 0.99,
+  "chunk_size": 262144
+}

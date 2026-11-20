@@ -21,6 +21,10 @@ def audit_model(directory):
     rows = PlyData.read(path, mmap='r')['vertex'].data
     lineage = np.load(directory/'lineage.npy', mmap_mode='r')
     expected = report['initial_count']+sum(e['parents'] for e in report['splits'])
+    # Splits replace one parent by two children, while scheduled pruning
+    # removes rows.  Residual additions (when enabled) are explicit events.
+    expected -= sum(e.get('removed', 0) for e in report.get('pruning', []))
+    expected += sum(e.get('selected', 0) for e in report.get('residual_surface_additions', []))
     if len(rows) != expected or len(lineage) != expected or report['gaussians'] != expected:
         raise ValueError('Model count does not match split history and lineage')
     maximum_thickness_error = maximum_quaternion_error = maximum_normal_error = 0.
@@ -50,6 +54,9 @@ def audit_model(directory):
     result = dict(status='pass', gaussians=len(rows), model_sha256=report['model_sha256'],
                   lineage_valid=True, all_rows_finite=True, maximum_quaternion_error=maximum_quaternion_error,
                   maximum_normal_error=maximum_normal_error, maximum_relative_thickness_error=maximum_thickness_error)
+    if report.get('voxel_constraint') is not None:
+        from mesh_to_gs.voxel_constraints import audit_exported_voxels
+        result['voxel_constraint'] = audit_exported_voxels(directory, rows, lineage, report['voxel_constraint'])
     (directory/'model_validation.json').write_text(json.dumps(result, indent=2)+'\n')
     return result
 
